@@ -245,12 +245,8 @@ func (p *Processor) updateAnnotations(service *v1.Service, lastKnownGoodEndpoint
 func (p *Processor) startServiceHandlingIfNeeded(svcCtx *servicecontext.Context, service *v1.Service,
 	serviceFunc func(*servicecontext.Context, *v1.Service, *sync.WaitGroup, bool) error, wg *sync.WaitGroup) error {
 	if p.config.EnableServicesElection {
-		// startLeaderElection restarts itself until the service context is cancelled,
-		// so start it only once instead of on every endpoint event.
-		svcCtx.StartLeaderElectionOnce(func() {
-			wg.Go(func() {
-				p.startLeaderElection(svcCtx, service, serviceFunc, wg)
-			})
+		wg.Go(func() {
+			p.startLeaderElection(svcCtx, service, serviceFunc, wg)
 		})
 		return nil
 	}

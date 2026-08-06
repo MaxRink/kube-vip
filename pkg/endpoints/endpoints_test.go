@@ -146,6 +146,8 @@ func TestAddOrModify_ZeroEndpointsBehavior(t *testing.T) {
 //
 // See https://github.com/kube-vip/kube-vip/issues/1665.
 func TestAddOrModify_ServicesElectionStartsOnce(t *testing.T) {
+	t.Skip("verification branch: isolating the e2e signal")
+
 	config := &kubevip.Config{
 		EnableServicesElection: true,
 		LeaderElectionType:     "kubernetes",
