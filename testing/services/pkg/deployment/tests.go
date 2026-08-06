@@ -679,6 +679,16 @@ func deleteDeployment(ctx context.Context, clientset *kubernetes.Clientset, name
 //     than the lease duration, which drives OnStoppedLeading and returns the
 //     election. The restart loop used to wedge on a WaitGroup exactly there, so
 //     kube_vip_service_election_attempts_total must advance afterwards.
+//   - an externalTrafficPolicy flip: tears the service down and rebuilds it, so the
+//     cleanup of the old lease must not cancel its replacement.
+//   - a burst of service events: the same spawn-once invariant driven from the
+//     service watch instead of the endpoint watch.
+//   - a partitioned follower: cutting a non-leader off from the apiserver must not
+//     move the lease, stop traffic, or leak a loop on the node that returns.
+//
+// The endpoint churn fault also asserts the yield half of the cycle: with a local
+// traffic policy and no endpoints anywhere, the address has to stop answering
+// instead of being left to black-hole traffic.
 //
 // After every fault the service has to converge: a live election loop, a held
 // lease, and a VIP that serves traffic.
@@ -838,8 +848,8 @@ func (config *TestConfig) ElectionFaults(ctx context.Context, clientset *kuberne
 
 	// Fault 5: a service change that tears the service down and rebuilds it.
 	// Flipping the external traffic policy makes serviceChanged cancel the service
-	// context and drop it from svcMap, so the next event has to build a fresh
-	// context and a fresh lease. Same desync class as fault 2, different trigger.
+	// context, so the next event has to build a fresh context and a fresh lease. The
+	// cleanup goroutine of the torn down lease must not cancel that replacement.
 	for _, policy := range []v1.ServiceExternalTrafficPolicy{
 		v1.ServiceExternalTrafficPolicyCluster,
 		v1.ServiceExternalTrafficPolicyLocal,
