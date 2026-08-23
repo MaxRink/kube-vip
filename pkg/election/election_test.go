@@ -126,10 +126,10 @@ func writeFakeAPIError(w http.ResponseWriter, err error) {
 	})
 }
 
-func newElectionTestRun(client *kubernetes.Clientset, identity, leaseName string, started, stopped chan struct{}) (*RunConfig, *atomic.Value) {
+func newElectionTestRun(client *kubernetes.Clientset, started, stopped chan struct{}) (*RunConfig, *atomic.Value) {
 	config := &kubevip.Config{
 		LeaderElectionType: "kubernetes",
-		NodeName:           identity,
+		NodeName:           electionTestIdentity,
 		KubernetesLeaderElection: kubevip.KubernetesLeaderElection{
 			LeaseDuration: 3,
 			RenewDeadline: 2,
@@ -140,7 +140,7 @@ func newElectionTestRun(client *kubernetes.Clientset, identity, leaseName string
 	observedLeader := &atomic.Value{}
 	run := &RunConfig{
 		Config:  config,
-		LeaseID: lease.NewID("kubernetes", electionTestNamespace, leaseName),
+		LeaseID: lease.NewID("kubernetes", electionTestNamespace, electionTestLeaseName),
 		Mgr: &Manager{
 			KubernetesClient:   client,
 			RetryWatcherClient: client,
@@ -168,12 +168,12 @@ func startElection(ctx context.Context, run *RunConfig) <-chan struct{} {
 	return done
 }
 
-func getTestLease(t *testing.T, client *fake.Clientset, name string) *coordinationv1.Lease {
+func getTestLease(t *testing.T, client *fake.Clientset) *coordinationv1.Lease {
 	t.Helper()
 
-	object, err := client.CoordinationV1().Leases(electionTestNamespace).Get(context.Background(), name, metav1.GetOptions{})
+	object, err := client.CoordinationV1().Leases(electionTestNamespace).Get(context.Background(), electionTestLeaseName, metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("getting lease %q: %v", name, err)
+		t.Fatalf("getting lease %q: %v", electionTestLeaseName, err)
 	}
 	return object
 }
@@ -194,13 +194,13 @@ func TestRunKubernetesLeaderElectionAcquiresLease(t *testing.T) {
 	api := newFakeKubernetesAPI(t)
 	started := make(chan struct{}, 1)
 	stopped := make(chan struct{}, 1)
-	run, observedLeader := newElectionTestRun(api.client, electionTestIdentity, electionTestLeaseName, started, stopped)
+	run, observedLeader := newElectionTestRun(api.client, started, stopped)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := startElection(ctx, run)
 
 	waitForSignal(t, started, "leader election to start leading")
-	object := getTestLease(t, api.fake, electionTestLeaseName)
+	object := getTestLease(t, api.fake)
 	if object.Spec.HolderIdentity == nil || *object.Spec.HolderIdentity != electionTestIdentity {
 		t.Fatalf("lease holder = %v, want %q", object.Spec.HolderIdentity, electionTestIdentity)
 	}
@@ -219,7 +219,7 @@ func TestRunKubernetesLeaderElectionReleasesLeaseOnCancel(t *testing.T) {
 	api := newFakeKubernetesAPI(t)
 	started := make(chan struct{}, 1)
 	stopped := make(chan struct{}, 1)
-	run, _ := newElectionTestRun(api.client, electionTestIdentity, electionTestLeaseName, started, stopped)
+	run, _ := newElectionTestRun(api.client, started, stopped)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := startElection(ctx, run)
@@ -229,7 +229,7 @@ func TestRunKubernetesLeaderElectionReleasesLeaseOnCancel(t *testing.T) {
 	waitForSignal(t, stopped, "leader election to stop after cancellation")
 	waitForSignal(t, done, "leader election goroutine to exit")
 
-	object := getTestLease(t, api.fake, electionTestLeaseName)
+	object := getTestLease(t, api.fake)
 	if object.Spec.HolderIdentity == nil || *object.Spec.HolderIdentity != "" {
 		t.Fatalf("released lease holder = %v, want an empty identity", object.Spec.HolderIdentity)
 	}
@@ -263,14 +263,14 @@ func TestRunKubernetesLeaderElectionReacquiresAfterLeaseLoss(t *testing.T) {
 
 	started := make(chan struct{}, 1)
 	stopped := make(chan struct{}, 1)
-	run, _ := newElectionTestRun(api.client, electionTestIdentity, electionTestLeaseName, started, stopped)
+	run, _ := newElectionTestRun(api.client, started, stopped)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := startElection(ctx, run)
 
 	waitForSignal(t, started, "initial leader election to start leading")
 
-	object := getTestLease(t, api.fake, electionTestLeaseName)
+	object := getTestLease(t, api.fake)
 	otherHolder := otherIdentity
 	object.Spec.HolderIdentity = &otherHolder
 	now := metav1.NewMicroTime(time.Now())
@@ -286,7 +286,7 @@ func TestRunKubernetesLeaderElectionReacquiresAfterLeaseLoss(t *testing.T) {
 	// runKubernetesLeaderElectionOrDie exits after a loss. The caller owns the restart loop,
 	// so free the lease and invoke it again to verify that a fresh run can be elected.
 	lossActive.Store(false)
-	object = getTestLease(t, api.fake, electionTestLeaseName)
+	object = getTestLease(t, api.fake)
 	object.Spec.HolderIdentity = new(string)
 	if _, err := api.fake.CoordinationV1().Leases(electionTestNamespace).Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("freeing lease for restart: %v", err)
@@ -294,13 +294,13 @@ func TestRunKubernetesLeaderElectionReacquiresAfterLeaseLoss(t *testing.T) {
 
 	startedAgain := make(chan struct{}, 1)
 	stoppedAgain := make(chan struct{}, 1)
-	runAgain, _ := newElectionTestRun(api.client, electionTestIdentity, electionTestLeaseName, startedAgain, stoppedAgain)
+	runAgain, _ := newElectionTestRun(api.client, startedAgain, stoppedAgain)
 	ctxAgain, cancelAgain := context.WithCancel(context.Background())
 	defer cancelAgain()
 	doneAgain := startElection(ctxAgain, runAgain)
 
 	waitForSignal(t, startedAgain, "restarted leader election to start leading")
-	object = getTestLease(t, api.fake, electionTestLeaseName)
+	object = getTestLease(t, api.fake)
 	if object.Spec.HolderIdentity == nil || *object.Spec.HolderIdentity != electionTestIdentity {
 		t.Fatalf("restarted lease holder = %v, want %q", object.Spec.HolderIdentity, electionTestIdentity)
 	}
