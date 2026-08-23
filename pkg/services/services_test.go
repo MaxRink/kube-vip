@@ -142,3 +142,14 @@ func Test_upnpLeaseDurationForService(t *testing.T) {
 		})
 	}
 }
+
+func TestDeleteServiceWithoutTrackedInstanceIsNoop(t *testing.T) {
+	p := &Processor{
+		config:           &kubevip.Config{},
+		ServiceInstances: nil,
+	}
+
+	if err := p.deleteService(context.Background(), "missing-service"); err != nil {
+		t.Fatalf("deleteService returned error for a missing instance: %v", err)
+	}
+}
