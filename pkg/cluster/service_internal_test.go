@@ -5,6 +5,8 @@ import (
 )
 
 func TestKubernetesAddrBackendEntry(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name     string
 		addr     string
@@ -43,6 +45,8 @@ func TestKubernetesAddrBackendEntry(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			entry := kubernetesAddrBackendEntry(tc.addr, tc.port)
 			if tc.wantNil {
 				if entry != nil {
