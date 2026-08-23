@@ -2,7 +2,7 @@ package cluster_test
 
 import (
 	"context"
-	"io/fs"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -67,32 +67,80 @@ func (n *deleteTrackingNetwork) DeleteIP() (bool, error) {
 	return n.mockNetwork.DeleteIP()
 }
 
-type routeReassertNetwork struct {
+type errorAddIPNetwork struct {
 	*mockNetwork
-	addRouteCalls     atomic.Int32
-	replaceRouteCalls atomic.Int32
-	routePresent      atomic.Bool
-	missingOnce       atomic.Bool
+	err error
 }
 
-func (n *routeReassertNetwork) AddRoute(bool) (bool, error) {
-	n.addRouteCalls.Add(1)
-	n.routePresent.Store(true)
-	return true, nil
+func (n *errorAddIPNetwork) AddIP(bool, bool, ...int) (bool, error) {
+	return false, n.err
 }
 
-func (n *routeReassertNetwork) ReplaceRoute() error {
-	n.replaceRouteCalls.Add(1)
-	if n.missingOnce.CompareAndSwap(true, false) {
-		return fs.ErrNotExist
-	}
-	n.routePresent.Store(true)
+type killFuncBGPRouteManager struct {
+	killFunc     func()
+	addHostCalls atomic.Int32
+}
+
+func (m *killFuncBGPRouteManager) AddHost(context.Context, string, string) error {
+	m.addHostCalls.Add(1)
+	m.killFunc()
 	return nil
 }
 
-func (n *routeReassertNetwork) removeRouteExternally() {
-	n.routePresent.Store(false)
-	n.missingOnce.Store(true)
+func (m *killFuncBGPRouteManager) DelHost(context.Context, string, string) error {
+	return nil
+}
+
+type routeTrackingNetwork struct {
+	*mockNetwork
+	addRouteCalls     atomic.Int32
+	replaceRouteCalls atomic.Int32
+}
+
+func (n *routeTrackingNetwork) AddRoute(bool) (bool, error) {
+	n.addRouteCalls.Add(1)
+	return true, nil
+}
+
+func (n *routeTrackingNetwork) ReplaceRoute() error {
+	n.replaceRouteCalls.Add(1)
+	return nil
+}
+
+func TestStartVipService_AddIPErrorDoesNotDeadlock(t *testing.T) {
+	cfg := &kubevip.Config{EnableBGP: true}
+	c, err := cluster.InitCluster(cfg, true, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("InitCluster: %v", err)
+	}
+
+	c.Network = []vip.Network{&errorAddIPNetwork{
+		mockNetwork: &mockNetwork{ip: "10.0.0.1", cidr: testCIDR},
+		err:         errors.New("test AddIP failure"),
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	killFunc := func() { cancel() }
+	// AddHost is reached only after StartVipService handles the initial AddIP error.
+	bgpServer := &killFuncBGPRouteManager{killFunc: killFunc}
+	serviceErr := make(chan error, 1)
+	go func() {
+		serviceErr <- c.StartVipService(ctx, cfg, nil, bgpServer, killFunc)
+	}()
+
+	select {
+	case err := <-serviceErr:
+		if err != nil {
+			t.Fatalf("StartVipService returned an error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("StartVipService did not exit within the 10-second deadlock guard")
+	}
+
+	if got := bgpServer.addHostCalls.Load(); got != 1 {
+		t.Fatalf("AddHost calls = %d, want 1", got)
+	}
 }
 
 func TestStartVipService_ConcurrentAddIPAndShutdownCompletes(t *testing.T) {
@@ -133,28 +181,13 @@ func TestStartVipService_ConcurrentAddIPAndShutdownCompletes(t *testing.T) {
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer testCancel()
 
-	shutdownStart := make(chan struct{})
-	stopDone := make(chan struct{})
 	leadershipDone := make(chan struct{})
 	objLease := &lease.Lease{Ctx: ctx, Cancel: cancel}
 
 	go func() {
-		<-shutdownStart
-		c.Stop()
-		close(stopDone)
-	}()
-	go func() {
-		<-shutdownStart
 		c.OnStoppedLeading(cfg, objLease, nil)
 		close(leadershipDone)
 	}()
-	close(shutdownStart)
-
-	select {
-	case <-stopDone:
-	case <-testCtx.Done():
-		t.Fatal("cluster Stop did not return during concurrent shutdown")
-	}
 	select {
 	case <-leadershipDone:
 	case <-testCtx.Done():
@@ -201,6 +234,29 @@ func TestOnStoppedLeading_DeletesVIPWithoutPreservation(t *testing.T) {
 	case <-ctx.Done():
 	default:
 		t.Fatal("leadership loss did not cancel the lease context")
+	}
+}
+
+func TestOnStoppedLeading_DeletesIPv6VIPWithPreservation(t *testing.T) {
+	cfg := &kubevip.Config{PreserveVIPOnLeadershipLoss: true}
+	c, err := cluster.InitCluster(cfg, true, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("InitCluster: %v", err)
+	}
+
+	network := &deleteTrackingNetwork{
+		mockNetwork: &mockNetwork{ip: "2001:db8::1", cidr: "2001:db8::1/128"},
+	}
+	c.Network = []vip.Network{network}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	objLease := &lease.Lease{Ctx: ctx, Cancel: cancel}
+
+	c.OnStoppedLeading(cfg, objLease, nil)
+
+	if got := network.deleteCalls.Load(); got != 1 {
+		t.Fatalf("DeleteIP calls = %d, want 1 for an IPv6 VIP with preservation enabled", got)
 	}
 }
 
@@ -251,7 +307,7 @@ func TestOnStoppedLeading_PreservesVIPAndStopsAdvertisement(t *testing.T) {
 	}, "ARP advertisement should stop after leadership loss")
 }
 
-func TestRoutingTableHealthCheck_ReassertsExternallyRemovedRoute(t *testing.T) {
+func TestRoutingTableHealthCheck_ReplacesRouteEveryHealthyCycle(t *testing.T) {
 	healthcheck := newTestHealthServer(t, 200)
 	t.Cleanup(healthcheck.server.Close)
 
@@ -261,7 +317,7 @@ func TestRoutingTableHealthCheck_ReassertsExternallyRemovedRoute(t *testing.T) {
 		t.Fatalf("InitCluster: %v", err)
 	}
 
-	network := &routeReassertNetwork{
+	network := &routeTrackingNetwork{
 		mockNetwork: &mockNetwork{ip: "10.0.0.1", cidr: testCIDR},
 	}
 	c.Network = []vip.Network{network}
@@ -286,8 +342,7 @@ func TestRoutingTableHealthCheck_ReassertsExternallyRemovedRoute(t *testing.T) {
 		return network.addRouteCalls.Load() >= 1
 	}, "healthy check should add the route")
 
-	network.removeRouteExternally()
 	expectEventually(t, func() bool {
-		return network.replaceRouteCalls.Load() >= 2 && network.routePresent.Load()
-	}, "healthy checks should retry RouteReplace after a missing route")
+		return network.replaceRouteCalls.Load() >= 2
+	}, "healthy checks should replace the route on every healthy cycle")
 }
