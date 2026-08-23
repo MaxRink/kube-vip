@@ -51,7 +51,7 @@ func newTrackedProcessor(t *testing.T, service *v1.Service) (*Processor, *servic
 	return p, ctx
 }
 
-func loadBalancerService(policy v1.ServiceExternalTrafficPolicyType, forceElection bool) *v1.Service {
+func loadBalancerService(policy v1.ServiceExternalTrafficPolicy, forceElection bool) *v1.Service {
 	annotations := map[string]string{}
 	if forceElection {
 		annotations[kubevip.ForcePerServiceElection] = "true"
@@ -76,15 +76,15 @@ func TestAddOrModifyThenDeleteIsIdempotentAcrossElectionModes(t *testing.T) {
 		name       string
 		forcedOnly bool
 		force      bool
-		policy     v1.ServiceExternalTrafficPolicyType
+		policy     v1.ServiceExternalTrafficPolicy
 		selected   bool
 	}{
-		{name: "global cluster", policy: v1.ServiceExternalTrafficPolicyTypeCluster, selected: true},
-		{name: "global local", policy: v1.ServiceExternalTrafficPolicyTypeLocal, selected: true},
-		{name: "per service cluster", forcedOnly: true, force: true, policy: v1.ServiceExternalTrafficPolicyTypeCluster, selected: true},
-		{name: "per service local", forcedOnly: true, force: true, policy: v1.ServiceExternalTrafficPolicyTypeLocal, selected: true},
-		{name: "global skips forced service", force: true, policy: v1.ServiceExternalTrafficPolicyTypeCluster},
-		{name: "per service skips ordinary service", forcedOnly: true, policy: v1.ServiceExternalTrafficPolicyTypeCluster},
+		{name: "global cluster", policy: v1.ServiceExternalTrafficPolicyCluster, selected: true},
+		{name: "global local", policy: v1.ServiceExternalTrafficPolicyLocal, selected: true},
+		{name: "per service cluster", forcedOnly: true, force: true, policy: v1.ServiceExternalTrafficPolicyCluster, selected: true},
+		{name: "per service local", forcedOnly: true, force: true, policy: v1.ServiceExternalTrafficPolicyLocal, selected: true},
+		{name: "global skips forced service", force: true, policy: v1.ServiceExternalTrafficPolicyCluster},
+		{name: "per service skips ordinary service", forcedOnly: true, policy: v1.ServiceExternalTrafficPolicyCluster},
 	}
 
 	for _, test := range tests {
@@ -132,9 +132,9 @@ func TestAddOrModifyThenDeleteIsIdempotentAcrossElectionModes(t *testing.T) {
 }
 
 func TestCommonLeaseRejectsLocalTrafficPolicy(t *testing.T) {
-	for _, policy := range []v1.ServiceExternalTrafficPolicyType{
-		v1.ServiceExternalTrafficPolicyTypeCluster,
-		v1.ServiceExternalTrafficPolicyTypeLocal,
+	for _, policy := range []v1.ServiceExternalTrafficPolicy{
+		v1.ServiceExternalTrafficPolicyCluster,
+		v1.ServiceExternalTrafficPolicyLocal,
 	} {
 		t.Run(string(policy), func(t *testing.T) {
 			service := loadBalancerService(policy, false)
@@ -143,7 +143,7 @@ func TestCommonLeaseRejectsLocalTrafficPolicy(t *testing.T) {
 			defer svcCtx.Cancel()
 
 			err := p.AddOrModify(context.Background(), watch.Event{Type: watch.Added, Object: service}, nil, false, nil, nil)
-			if policy == v1.ServiceExternalTrafficPolicyTypeLocal {
+			if policy == v1.ServiceExternalTrafficPolicyLocal {
 				if err == nil {
 					t.Fatal("local service using a common lease was accepted")
 				}
