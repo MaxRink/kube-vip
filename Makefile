@@ -133,7 +133,7 @@ manifest-test:
 	docker run $(REPOSITORY)/$(TARGET):$(DOCKERTAG) manifest daemonset --interface eth0 --vip 192.168.0.1 --image "$(REPOSITORY)/$(TARGET):$(DOCKERTAG)" --bgp --leaderElection --controlplane --services --inCluster
 
 unit-tests:
-	go test -race ./...
+	go test -race -shuffle=on ./...
 
 unit-tests-docker:
 	docker run --rm -w /kube-vip -v $$(pwd):/kube-vip -v kube-vip-gomod-cache:/go/pkg/mod -v kube-vip-gobuild-cache:/root/.cache/go-build golang:$(GO_VERSION) make unit-tests

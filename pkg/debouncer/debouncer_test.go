@@ -15,6 +15,8 @@ import (
 )
 
 func TestTimeSetting(t *testing.T) {
+	t.Parallel()
+
 	tcs := []struct {
 		name       string
 		configured string
