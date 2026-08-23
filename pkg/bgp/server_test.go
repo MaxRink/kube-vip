@@ -108,23 +108,22 @@ func TestBGPSessionMetricTransitions(t *testing.T) {
 		Peer: peer,
 	})
 
-	const peerLabel = "192.0.2.30:179"
-	assertSessionMetricState(t, peerLabel, "SESSION_STATE_ESTABLISHED", 1)
-	assertSessionMetricState(t, peerLabel, "SESSION_STATE_IDLE", 0)
+	assertSessionMetricState(t, "SESSION_STATE_ESTABLISHED", 1)
+	assertSessionMetricState(t, "SESSION_STATE_IDLE", 0)
 
 	// INIT and END_OF_INIT events do not carry a session state and must not
 	// overwrite the most recent state gauge values.
 	updateSessionMetric(&apiutil.WatchEventMessage_PeerEvent{Type: apiutil.PEER_EVENT_INIT})
 	updateSessionMetric(&apiutil.WatchEventMessage_PeerEvent{Type: apiutil.PEER_EVENT_END_OF_INIT})
-	assertSessionMetricState(t, peerLabel, "SESSION_STATE_ESTABLISHED", 1)
+	assertSessionMetricState(t, "SESSION_STATE_ESTABLISHED", 1)
 
 	peer.State.SessionState = packetbgp.BGP_FSM_IDLE
 	updateSessionMetric(&apiutil.WatchEventMessage_PeerEvent{
 		Type: apiutil.PEER_EVENT_STATE,
 		Peer: peer,
 	})
-	assertSessionMetricState(t, peerLabel, "SESSION_STATE_IDLE", 1)
-	assertSessionMetricState(t, peerLabel, "SESSION_STATE_ESTABLISHED", 0)
+	assertSessionMetricState(t, "SESSION_STATE_IDLE", 1)
+	assertSessionMetricState(t, "SESSION_STATE_ESTABLISHED", 0)
 }
 
 func updateSessionMetric(event *apiutil.WatchEventMessage_PeerEvent) {
@@ -145,9 +144,11 @@ func updateSessionMetric(event *apiutil.WatchEventMessage_PeerEvent) {
 	}
 }
 
-func assertSessionMetricState(t *testing.T, peer, state string, want float64) {
+const sessionMetricPeerLabel = "192.0.2.30:179"
+
+func assertSessionMetricState(t *testing.T, state string, want float64) {
 	t.Helper()
-	if got := testutil.ToFloat64(metrics.BGPSessionInfoGauge.WithLabelValues(state, peer)); got != want {
-		t.Errorf("BGP session metric %s/%s = %v, want %v", state, peer, got, want)
+	if got := testutil.ToFloat64(metrics.BGPSessionInfoGauge.WithLabelValues(state, sessionMetricPeerLabel)); got != want {
+		t.Errorf("BGP session metric %s/%s = %v, want %v", state, sessionMetricPeerLabel, got, want)
 	}
 }

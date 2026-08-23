@@ -29,8 +29,10 @@ func TestEndpointProvidersParityForLocalAndAllEndpoints(t *testing.T) {
 	}
 
 	legacy := NewEndpoints()
+	//nolint:staticcheck // this test covers the deprecated legacy Endpoints provider on purpose
 	if err := legacy.LoadObject(&v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{Name: "service", Namespace: "default"},
+		//nolint:staticcheck // deprecated legacy Endpoints API is the subject under test
 		Subsets: []v1.EndpointSubset{{
 			Addresses: []v1.EndpointAddress{
 				{IP: "10.0.0.1", NodeName: &nodeA},
@@ -124,8 +126,10 @@ func TestEndpointSlicesLocalFilteringRequiresServingEndpoint(t *testing.T) {
 func TestResolvePortFromFakeClientObjects(t *testing.T) {
 	t.Parallel()
 
+	//nolint:staticcheck // deprecated legacy Endpoints API is the subject under test
 	legacyObject := &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{Name: "service", Namespace: "default"},
+		//nolint:staticcheck // deprecated legacy Endpoints API is the subject under test
 		Subsets: []v1.EndpointSubset{{
 			Ports: []v1.EndpointPort{{Name: "web", Port: 8080}},
 		}},
