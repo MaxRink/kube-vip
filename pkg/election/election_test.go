@@ -65,7 +65,7 @@ func newFakeKubernetesAPI(t *testing.T, objects ...runtime.Object) *fakeKubernet
 func serveFakeKubernetesRequest(w http.ResponseWriter, r *http.Request, client *fake.Clientset) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 6 || parts[0] != "apis" || parts[1] != "coordination.k8s.io" || parts[2] != "v1" || parts[3] != "namespaces" || parts[5] != "leases" {
-		http.NotFound(w, r)
+		http.Error(w, fmt.Sprintf("fake API: unhandled path %s %s", r.Method, r.URL.Path), http.StatusNotFound)
 		return
 	}
 
@@ -93,7 +93,7 @@ func serveFakeKubernetesRequest(w http.ResponseWriter, r *http.Request, client *
 			object, err = leases.Update(r.Context(), object, metav1.UpdateOptions{})
 		}
 	default:
-		http.NotFound(w, r)
+		http.Error(w, fmt.Sprintf("fake API: unhandled verb %s %s", r.Method, r.URL.Path), http.StatusNotFound)
 		return
 	}
 
@@ -126,7 +126,7 @@ func writeFakeAPIError(w http.ResponseWriter, err error) {
 	})
 }
 
-func newElectionTestRun(client *kubernetes.Clientset, identity, leaseName string, started, stopped chan struct{}) (*RunConfig, *kubevip.Config) {
+func newElectionTestRun(client *kubernetes.Clientset, identity, leaseName string, started, stopped chan struct{}) (*RunConfig, *atomic.Value) {
 	config := &kubevip.Config{
 		LeaderElectionType: "kubernetes",
 		NodeName:           identity,
@@ -137,6 +137,7 @@ func newElectionTestRun(client *kubernetes.Clientset, identity, leaseName string
 		},
 	}
 
+	observedLeader := &atomic.Value{}
 	run := &RunConfig{
 		Config:  config,
 		LeaseID: lease.NewID("kubernetes", electionTestNamespace, leaseName),
@@ -150,10 +151,12 @@ func newElectionTestRun(client *kubernetes.Clientset, identity, leaseName string
 		OnStoppedLeading: func() {
 			stopped <- struct{}{}
 		},
-		OnNewLeader: func(string) {},
+		OnNewLeader: func(leader string) {
+			observedLeader.Store(leader)
+		},
 	}
 
-	return run, config
+	return run, observedLeader
 }
 
 func startElection(ctx context.Context, run *RunConfig) <-chan struct{} {
@@ -191,14 +194,18 @@ func TestRunKubernetesLeaderElectionAcquiresLease(t *testing.T) {
 	api := newFakeKubernetesAPI(t)
 	started := make(chan struct{}, 1)
 	stopped := make(chan struct{}, 1)
-	run, _ := newElectionTestRun(api.client, electionTestIdentity, electionTestLeaseName, started, stopped)
+	run, observedLeader := newElectionTestRun(api.client, electionTestIdentity, electionTestLeaseName, started, stopped)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := startElection(ctx, run)
 
 	waitForSignal(t, started, "leader election to start leading")
 	object := getTestLease(t, api.fake, electionTestLeaseName)
 	if object.Spec.HolderIdentity == nil || *object.Spec.HolderIdentity != electionTestIdentity {
 		t.Fatalf("lease holder = %v, want %q", object.Spec.HolderIdentity, electionTestIdentity)
+	}
+	if leader, _ := observedLeader.Load().(string); leader != electionTestIdentity {
+		t.Fatalf("OnNewLeader observed %q, want %q", leader, electionTestIdentity)
 	}
 
 	cancel()
@@ -214,6 +221,7 @@ func TestRunKubernetesLeaderElectionReleasesLeaseOnCancel(t *testing.T) {
 	stopped := make(chan struct{}, 1)
 	run, _ := newElectionTestRun(api.client, electionTestIdentity, electionTestLeaseName, started, stopped)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := startElection(ctx, run)
 
 	waitForSignal(t, started, "leader election to start leading")
@@ -288,6 +296,7 @@ func TestRunKubernetesLeaderElectionReacquiresAfterLeaseLoss(t *testing.T) {
 	stoppedAgain := make(chan struct{}, 1)
 	runAgain, _ := newElectionTestRun(api.client, electionTestIdentity, electionTestLeaseName, startedAgain, stoppedAgain)
 	ctxAgain, cancelAgain := context.WithCancel(context.Background())
+	defer cancelAgain()
 	doneAgain := startElection(ctxAgain, runAgain)
 
 	waitForSignal(t, startedAgain, "restarted leader election to start leading")
