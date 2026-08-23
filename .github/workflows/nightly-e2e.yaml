@@ -4,12 +4,18 @@ on:
   schedule:
     - cron: '30 2 * * *'
   workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
 
+# These targets are added by the dependent test PRs: faults (#15), matrix (#23),
+# and scale (#24). Keep the references here until those PRs are merged.
+
 jobs:
   unit-coverage:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'e2e-full')
     runs-on: ubuntu-latest
     name: Unit tests with coverage
     timeout-minutes: 30
@@ -29,11 +35,110 @@ jobs:
           path: coverage.out
           if-no-files-found: error
         if: always()
+
+  faults-e2e:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'e2e-full')
+    runs-on: ubuntu-latest
+    name: Fault E2E (${{ matrix.mode }})
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [arp, rt, bgp]
+    env:
+      TEST_MODE: ${{ matrix.mode }}
+    steps:
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d-%H-%M')" >> "$GITHUB_OUTPUT"
+      - name: Ensure fs wont cause issues
+        run: sudo sysctl fs.inotify.max_user_instances=8192 && sudo sysctl fs.inotify.max_user_watches=524288
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build image locally
+        run: make dockerx86Local
+      - name: Run fault tests
+        run: DOCKER_API_VERSION=1.48 E2E_KEEP_LOGS=true GINKGO_ARGS="--json-report=/tmp/kube-vip-test-report-faults-${{ matrix.mode }}.json --output-dir=/tmp" make e2e-tests-faults
+      - name: Save logs
+        uses: actions/upload-artifact@v7
+        with:
+          name: faults-e2e-logs-${{ matrix.mode }}-${{ steps.date.outputs.date }}
+          path: /tmp/kube-vip-test*
+        if: always()
+
+  matrix-e2e:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'e2e-full')
+    runs-on: ubuntu-latest
+    name: Matrix E2E (shard ${{ matrix.shard }}/4)
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d-%H-%M')" >> "$GITHUB_OUTPUT"
+      - name: Ensure fs wont cause issues
+        run: sudo sysctl fs.inotify.max_user_instances=8192 && sudo sysctl fs.inotify.max_user_watches=524288
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build image locally
+        run: make dockerx86Local
+      - name: Run matrix tests
+        run: MATRIX_SHARD=${{ matrix.shard }}/4 DOCKER_API_VERSION=1.48 E2E_KEEP_LOGS=true GINKGO_ARGS="--json-report=/tmp/kube-vip-test-report-matrix-${{ matrix.shard }}.json --output-dir=/tmp" make e2e-tests-matrix
+      - name: Save logs
+        uses: actions/upload-artifact@v7
+        with:
+          name: matrix-e2e-logs-shard-${{ matrix.shard }}-${{ steps.date.outputs.date }}
+          path: /tmp/kube-vip-test*
+        if: always()
+
+  scale-e2e:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'e2e-full')
+    runs-on: ubuntu-latest
+    name: Scale E2E
+    timeout-minutes: 180
+    steps:
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d-%H-%M')" >> "$GITHUB_OUTPUT"
+      - name: Ensure fs wont cause issues
+        run: sudo sysctl fs.inotify.max_user_instances=8192 && sudo sysctl fs.inotify.max_user_watches=524288
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build image locally
+        run: make dockerx86Local
+      - name: Run scale tests
+        run: DOCKER_API_VERSION=1.48 E2E_KEEP_LOGS=true GINKGO_ARGS="--json-report=/tmp/kube-vip-test-report-scale.json --output-dir=/tmp" make e2e-tests-scale
+      - name: Save logs
+        uses: actions/upload-artifact@v7
+        with:
+          name: scale-e2e-logs-${{ steps.date.outputs.date }}
+          path: /tmp/kube-vip-test*
+        if: always()
+
   etcd-e2e:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'e2e-full')
     runs-on: ubuntu-latest
     name: Etcd E2E tests
     timeout-minutes: 60
     steps:
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d-%H-%M')" >> "$GITHUB_OUTPUT"
       - name: Ensure fs wont cause issues
         run: sudo sysctl fs.inotify.max_user_instances=8192 && sudo sysctl fs.inotify.max_user_watches=524288
       - name: Checkout code
@@ -56,6 +161,34 @@ jobs:
       - name: Save logs
         uses: actions/upload-artifact@v7
         with:
-          name: etcd-e2e-logs
+          name: etcd-e2e-logs-${{ steps.date.outputs.date }}
           path: /tmp/kube-vip-test*
+        if: always()
+
+  service-e2e-tests:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'e2e-full')
+    runs-on: ubuntu-latest
+    name: E2E service tests
+    timeout-minutes: 60
+    steps:
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d-%H-%M')" >> "$GITHUB_OUTPUT"
+      - name: Ensure fs wont cause issues
+        run: sudo sysctl fs.inotify.max_user_instances=8192 && sudo sysctl fs.inotify.max_user_watches=524288
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build image with iptables
+        run: make dockerx86ActionIPTables
+      - name: Run service tests
+        run: DOCKER_API_VERSION=1.48 DOCKERTAG=action E2E_KEEP_LOGS=true make service-tests
+      - name: Save logs
+        uses: actions/upload-artifact@v7
+        with:
+          name: services-test-logs-${{ steps.date.outputs.date }}
+          path: /tmp/kube-vip-services*
         if: always()
