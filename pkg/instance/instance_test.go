@@ -3,7 +3,6 @@ package instance
 import (
 	"context"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -38,13 +37,22 @@ func TestFetchServiceAddresses_PrecedenceAndOrdering(t *testing.T) {
 			wantHosts: []string{"vip.example"},
 		},
 		{
-			name: "status hostname takes precedence over legacy spec address",
+			name: "status hostname is used when no status IP is present",
 			status: []v1.LoadBalancerIngress{
 				{Hostname: "status.example"},
 			},
 			specIP:    "192.0.2.30",
 			wantIPs:   []string{},
 			wantHosts: []string{"status.example"},
+		},
+		{
+			name: "spec address wins over a different same-family status IP",
+			status: []v1.LoadBalancerIngress{
+				{IP: "192.0.2.20"},
+			},
+			specIP:    "192.0.2.30",
+			wantIPs:   []string{"192.0.2.30"},
+			wantHosts: []string{},
 		},
 		{
 			name: "status preserves dual-stack ingress ordering",
@@ -89,8 +97,6 @@ func TestFetchServiceAddresses_PrecedenceAndOrdering(t *testing.T) {
 }
 
 func TestNewInstance_SetsDualStackFlagsFromServiceSpec(t *testing.T) {
-	requireLinuxNetlink(t)
-
 	tests := []struct {
 		name            string
 		families        []v1.IPFamily
@@ -156,8 +162,6 @@ func TestNewInstance_SetsDualStackFlagsFromServiceSpec(t *testing.T) {
 }
 
 func TestNewInstance_RejectsDHCPWithMoreThanTwoAddresses(t *testing.T) {
-	requireLinuxNetlink(t)
-
 	svc := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
@@ -175,13 +179,4 @@ func TestNewInstance_RejectsDHCPWithMoreThanTwoAddresses(t *testing.T) {
 	}
 }
 
-func TestAutoFindInterfaceAndSubnet_RequiresNetlinkFixture(t *testing.T) {
-	t.Skip("autoFindInterface and autoFindSubnet call package-global netlink APIs; deterministic fixtures require an injectable netlink seam and belong in Linux integration/e2e coverage")
-}
-
-func requireLinuxNetlink(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skip("NewInstance reaches package-global netlink APIs; these tests require Linux netlink state")
-	}
-}
+// autoFindInterface and autoFindSubnet need package-global netlink state; cover them in Linux integration/e2e tests.
