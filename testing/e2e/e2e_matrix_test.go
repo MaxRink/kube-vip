@@ -340,7 +340,10 @@ func matrixLoopMetrics(combo matrix.Combo, hasService bool) []matrixLoopMetric {
 	assertions := make([]matrixLoopMetric, 0, 4)
 	if hasService {
 		serviceWatchers := float64(1)
-		if combo.Election == matrix.ElectionOnDemand && (combo.Mode == matrix.ModeARP || combo.Mode == matrix.ModeRT && (combo.Function == matrix.FunctionCP || combo.Function == matrix.FunctionBoth)) {
+		// On-demand mode runs the forced per-service watcher alongside the
+		// regular service watcher. The latter may ignore this annotated
+		// service, but its watcher loop is still live.
+		if combo.Election == matrix.ElectionOnDemand {
 			serviceWatchers = 2
 		}
 		assertions = append(assertions,
@@ -365,23 +368,33 @@ func matrixLoopMetrics(combo matrix.Combo, hasService bool) []matrixLoopMetric {
 	}
 
 	electionLoops := 0
-	if combo.Election != matrix.ElectionNone {
-		if combo.Function == matrix.FunctionCP || combo.Function == matrix.FunctionBoth {
-			if combo.Mode != matrix.ModeBGP {
+	// ARP's control-plane worker always uses the control-plane election. BGP
+	// disables it in its manifest, while routing-table control-plane startup
+	// directly serves the VIP and does not create an election loop.
+	if combo.Mode == matrix.ModeARP && (combo.Function == matrix.FunctionCP || combo.Function == matrix.FunctionBoth) {
+		electionLoops++
+	}
+	if hasService {
+		switch combo.Mode {
+		case matrix.ModeARP:
+			if combo.Election == matrix.ElectionPerService {
+				electionLoops++
+			} else {
+				// ARP uses GlobalLeader for every non per-service service
+				// arrangement, including the no-election matrix value.
 				electionLoops++
 			}
-		}
-		if hasService {
+		case matrix.ModeBGP:
+			if combo.Election == matrix.ElectionPerService || combo.Election == matrix.ElectionOnDemand {
+				electionLoops++
+			}
+		case matrix.ModeRT:
 			switch combo.Election {
-			case matrix.ElectionGlobal:
-				if combo.Mode != matrix.ModeBGP {
-					electionLoops++
-				}
-			case matrix.ElectionPerService:
+			case matrix.ElectionGlobal, matrix.ElectionPerService:
 				electionLoops++
 			case matrix.ElectionOnDemand:
 				electionLoops++
-				if combo.Mode == matrix.ModeARP || combo.Mode == matrix.ModeRT && (combo.Function == matrix.FunctionCP || combo.Function == matrix.FunctionBoth) {
+				if combo.Function == matrix.FunctionBoth {
 					electionLoops++
 				}
 			}
