@@ -45,3 +45,29 @@ The metrics-enabled tests require kube-vip to expose port `2112` in the kind
 node and require `curl` in the node image. Keep metric assertions focused on
 stable behavior and use label selectors instead of depending on the ordering
 of Prometheus samples.
+
+## Metric-based E2E assertions
+
+The fault and matrix suites use the helpers above to validate both functional
+behavior and observability. Metric checks are capability-gated: if a selected
+metric is not exported by the kube-vip image, only the metric-dependent spec
+is skipped with an explanatory message. This keeps the E2E stack usable while
+the implementation metrics are being introduced.
+
+The assertion layer provides these common checks:
+
+* control-plane and service fault recovery leaves leader, watcher, election,
+  and VIP-address gauges at their expected steady-state values;
+* loop gauges are sampled twice with a gap, so a transient healthy scrape does
+  not hide a leaked goroutine;
+* VIP, route, BGP, and egress operation counters change when a fault exercises
+  the corresponding path and remain quiet during steady state;
+* watcher-restart counters increase only when a watcher actually restarts;
+* matrix conformance checks include leader state, active service count, and
+  per-node loop liveness in addition to functional connectivity.
+
+When adding a metric assertion, prefer `requireMetricCapability` (or its
+label-aware variants) before the assertion, and use `CounterSumDelta` for a
+counter where `op`/`result` labels intentionally match multiple series.
+Use `assertEventuallyStableMetric` for gauges that must remain at a value after
+recovery.
