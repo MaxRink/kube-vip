@@ -24,7 +24,7 @@ GINKGO_PARALLEL := $(if $(GINKGO_PROCS),--procs=$(GINKGO_PROCS),-p)
 TEST_MODE ?= arp
 BUILDX_CACHE_FLAGS ?=
 
-.PHONY: all build clean install uninstall simplify check run e2e-tests e2e-tests-faults unit-tests integration-tests unit-tests-docker integration-tests-docker
+.PHONY: all build clean install uninstall simplify check run e2e-tests e2e-tests-faults e2e-tests-scale unit-tests integration-tests unit-tests-docker integration-tests-docker
 
 all: check install
 
@@ -153,6 +153,9 @@ e2e-tests-bgp: get-whoami get-gobgp
 
 e2e-tests-faults: get-whoami
 	GOMAXPROCS=4 TEST_MODE=$(TEST_MODE) K8S_IMAGE_PATH=kindest/node:$(K8S_VERSION) E2E_IMAGE_PATH=$(REPOSITORY)/$(TARGET):$(DOCKERTAG) go run github.com/onsi/ginkgo/v2/ginkgo --tags=e2e -v $(GINKGO_PARALLEL) $(GINKGO_ARGS) --label-filter=faults ./testing/e2e
+
+e2e-tests-scale: get-whoami
+	GOMAXPROCS=4 TEST_MODE=arp K8S_IMAGE_PATH=kindest/node:$(K8S_VERSION) E2E_IMAGE_PATH=$(REPOSITORY)/$(TARGET):$(DOCKERTAG) go run github.com/onsi/ginkgo/v2/ginkgo --tags=e2e -v $(GINKGO_PARALLEL) $(GINKGO_ARGS) --label-filter=scale ./testing/e2e
 
 e2e-tests: e2e-tests-arp e2e-tests-rt e2e-tests-bgp
 
