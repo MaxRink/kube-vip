@@ -9,15 +9,31 @@ import (
 type Context struct {
 	Ctx                 context.Context
 	Cancel              context.CancelFunc
+	parent              context.Context
 	ConfiguredNetworks  sync.Map
 	leaderElection      sync.Once
 	Signalled           atomic.Bool
 	stateMutex          sync.Mutex
 	isWatched           bool
+	leaderLoop          bool
 	endpointsReady      chan any
+	endpointsLost       chan any
 	leaderCancel        context.CancelFunc
 	leaderCancelPending bool
 	leaderCancelRunning bool
+	leaderErr           error
+}
+
+func (ctx *Context) SetLeaderError(err error) {
+	ctx.stateMutex.Lock()
+	ctx.leaderErr = err
+	ctx.stateMutex.Unlock()
+}
+
+func (ctx *Context) LeaderError() error {
+	ctx.stateMutex.Lock()
+	defer ctx.stateMutex.Unlock()
+	return ctx.leaderErr
 }
 
 func New(ctx context.Context) *Context {
@@ -26,8 +42,15 @@ func New(ctx context.Context) *Context {
 	return &Context{
 		Ctx:            svcCtx,
 		Cancel:         svcCancel,
+		parent:         ctx,
 		endpointsReady: make(chan any),
+		endpointsLost:  make(chan any),
 	}
+}
+
+// Parent returns the stable context from which this service context was derived.
+func (ctx *Context) Parent() context.Context {
+	return ctx.parent
 }
 
 func (ctx *Context) HasConfiguredNetworks() bool {
@@ -52,10 +75,35 @@ func (ctx *Context) StartLeaderElectionOnce(f func()) {
 	ctx.leaderElection.Do(f)
 }
 
+// StartLeaderLoop claims ownership of the long-running election loop.
+func (ctx *Context) StartLeaderLoop() bool {
+	ctx.stateMutex.Lock()
+	defer ctx.stateMutex.Unlock()
+	if ctx.leaderLoop {
+		return false
+	}
+	ctx.leaderLoop = true
+	return true
+}
+
+// FinishLeaderLoop releases ownership after the long-running loop exits.
+func (ctx *Context) FinishLeaderLoop() {
+	ctx.stateMutex.Lock()
+	ctx.leaderLoop = false
+	ctx.stateMutex.Unlock()
+}
+
 func (ctx *Context) Readiness() <-chan any {
 	ctx.stateMutex.Lock()
 	defer ctx.stateMutex.Unlock()
 	return ctx.endpointsReady
+}
+
+// ReadinessGeneration returns the signals for one exact endpoint generation.
+func (ctx *Context) ReadinessGeneration() (<-chan any, <-chan any) {
+	ctx.stateMutex.Lock()
+	defer ctx.stateMutex.Unlock()
+	return ctx.endpointsReady, ctx.endpointsLost
 }
 
 func (ctx *Context) SignalReadiness() {
@@ -71,7 +119,9 @@ func (ctx *Context) ResetReadiness() {
 	ctx.stateMutex.Lock()
 	defer ctx.stateMutex.Unlock()
 	if ctx.Signalled.Load() {
+		close(ctx.endpointsLost)
 		ctx.endpointsReady = make(chan any)
+		ctx.endpointsLost = make(chan any)
 		ctx.Signalled.Store(false)
 	}
 }
