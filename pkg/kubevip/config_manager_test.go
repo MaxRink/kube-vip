@@ -3,6 +3,8 @@ package kubevip
 import "testing"
 
 func TestCheckSubnetExists(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		config  Config
@@ -47,6 +49,8 @@ func TestCheckSubnetExists(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			err := tt.config.CheckSubnetExists()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("CheckSubnetExists() error = %v, wantErr %v", err, tt.wantErr)

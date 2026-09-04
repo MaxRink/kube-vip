@@ -7,6 +7,8 @@ import (
 )
 
 func TestLoadConfigFromFile(t *testing.T) {
+	t.Parallel()
+
 	// Create temporary directory for test files
 	tmpDir, err := os.MkdirTemp("", "kube-vip-config-test")
 	if err != nil {
@@ -269,6 +271,8 @@ bgpConfig:
 }
 
 func TestMergeConfigFromFile(t *testing.T) {
+	t.Parallel()
+
 	// Create temporary directory for test files
 	tmpDir, err := os.MkdirTemp("", "kube-vip-merge-test")
 	if err != nil {
@@ -412,6 +416,8 @@ prometheusHTTPServer: ":3000"
 }
 
 func TestMergeConfigValues(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		baseConfig   *Config
@@ -511,6 +517,8 @@ func TestMergeConfigValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			mergeConfigValues(tt.baseConfig, tt.fileConfig)
 
 			// Compare results
@@ -546,6 +554,8 @@ func TestMergeConfigValues(t *testing.T) {
 }
 
 func TestLoadConfigFromFile_FileNotExists(t *testing.T) {
+	t.Parallel()
+
 	_, err := LoadConfigFromFile("/non/existent/path/config.yaml")
 	if err == nil {
 		t.Error("LoadConfigFromFile() expected error for non-existent file, got nil")

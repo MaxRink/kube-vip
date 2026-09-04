@@ -6,6 +6,8 @@ import (
 )
 
 func TestValidate_HealthCheckAddress(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		address string
@@ -23,6 +25,8 @@ func TestValidate_HealthCheckAddress(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			c := &Config{ControlPlaneHealthCheck: HealthCheck{Address: tt.address}}
 			err := c.Validate()
 			if (err != nil) != tt.wantErr {
@@ -33,6 +37,8 @@ func TestValidate_HealthCheckAddress(t *testing.T) {
 }
 
 func TestValidate_InstanceName(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		instanceName string
@@ -53,6 +59,8 @@ func TestValidate_InstanceName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			config := &Config{InstanceName: tt.instanceName}
 			err := config.Validate()
 			if (err != nil) != tt.wantErr {
@@ -63,6 +71,8 @@ func TestValidate_InstanceName(t *testing.T) {
 }
 
 func TestInstanceNameLimitReservesNftablesPrefixAndFamilySuffix(t *testing.T) {
+	t.Parallel()
+
 	name := strings.Repeat("a", instanceNameMaxLength)
 	if got := len(egressNftablesTablePrefix + name + egressNftablesTableSuffix); got != nftablesNameMaxLength {
 		t.Fatalf("family-specific table name length = %d, want %d", got, nftablesNameMaxLength)
