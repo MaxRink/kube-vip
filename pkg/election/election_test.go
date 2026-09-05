@@ -126,7 +126,7 @@ func writeFakeAPIError(w http.ResponseWriter, err error) {
 	})
 }
 
-func newElectionTestRun(client *kubernetes.Clientset, started, stopped chan struct{}) (*RunConfig, *atomic.Value) {
+func newElectionTestRun(client *kubernetes.Clientset, started, stopped chan struct{}) (*RunConfig, <-chan string) {
 	config := &kubevip.Config{
 		LeaderElectionType: "kubernetes",
 		NodeName:           electionTestIdentity,
@@ -137,7 +137,7 @@ func newElectionTestRun(client *kubernetes.Clientset, started, stopped chan stru
 		},
 	}
 
-	observedLeader := &atomic.Value{}
+	observedLeader := make(chan string, 1)
 	run := &RunConfig{
 		Config:  config,
 		LeaseID: lease.NewID("kubernetes", electionTestNamespace, electionTestLeaseName),
@@ -152,20 +152,31 @@ func newElectionTestRun(client *kubernetes.Clientset, started, stopped chan stru
 			stopped <- struct{}{}
 		},
 		OnNewLeader: func(leader string) {
-			observedLeader.Store(leader)
+			observedLeader <- leader
 		},
 	}
 
 	return run, observedLeader
 }
 
-func startElection(ctx context.Context, run *RunConfig) <-chan struct{} {
+func startElection(t *testing.T, run *RunConfig) (context.CancelFunc, <-chan struct{}) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		runKubernetesLeaderElectionOrDie(ctx, run)
 		close(done)
 	}()
-	return done
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Errorf("timed out waiting for leader election goroutine cleanup")
+		}
+	})
+	return cancel, done
 }
 
 func getTestLease(t *testing.T, client *fake.Clientset) *coordinationv1.Lease {
@@ -195,17 +206,20 @@ func TestRunKubernetesLeaderElectionAcquiresLease(t *testing.T) {
 	started := make(chan struct{}, 1)
 	stopped := make(chan struct{}, 1)
 	run, observedLeader := newElectionTestRun(api.client, started, stopped)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := startElection(ctx, run)
+	cancel, done := startElection(t, run)
 
 	waitForSignal(t, started, "leader election to start leading")
+	select {
+	case leader := <-observedLeader:
+		if leader != electionTestIdentity {
+			t.Fatalf("OnNewLeader observed %q, want %q", leader, electionTestIdentity)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for OnNewLeader callback")
+	}
 	object := getTestLease(t, api.fake)
 	if object.Spec.HolderIdentity == nil || *object.Spec.HolderIdentity != electionTestIdentity {
 		t.Fatalf("lease holder = %v, want %q", object.Spec.HolderIdentity, electionTestIdentity)
-	}
-	if leader, _ := observedLeader.Load().(string); leader != electionTestIdentity {
-		t.Fatalf("OnNewLeader observed %q, want %q", leader, electionTestIdentity)
 	}
 
 	cancel()
@@ -220,9 +234,7 @@ func TestRunKubernetesLeaderElectionReleasesLeaseOnCancel(t *testing.T) {
 	started := make(chan struct{}, 1)
 	stopped := make(chan struct{}, 1)
 	run, _ := newElectionTestRun(api.client, started, stopped)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := startElection(ctx, run)
+	cancel, done := startElection(t, run)
 
 	waitForSignal(t, started, "leader election to start leading")
 	cancel()
@@ -264,9 +276,7 @@ func TestRunKubernetesLeaderElectionReacquiresAfterLeaseLoss(t *testing.T) {
 	started := make(chan struct{}, 1)
 	stopped := make(chan struct{}, 1)
 	run, _ := newElectionTestRun(api.client, started, stopped)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := startElection(ctx, run)
+	_, done := startElection(t, run)
 
 	waitForSignal(t, started, "initial leader election to start leading")
 
@@ -295,9 +305,7 @@ func TestRunKubernetesLeaderElectionReacquiresAfterLeaseLoss(t *testing.T) {
 	startedAgain := make(chan struct{}, 1)
 	stoppedAgain := make(chan struct{}, 1)
 	runAgain, _ := newElectionTestRun(api.client, startedAgain, stoppedAgain)
-	ctxAgain, cancelAgain := context.WithCancel(context.Background())
-	defer cancelAgain()
-	doneAgain := startElection(ctxAgain, runAgain)
+	cancelAgain, doneAgain := startElection(t, runAgain)
 
 	waitForSignal(t, startedAgain, "restarted leader election to start leading")
 	object = getTestLease(t, api.fake)
