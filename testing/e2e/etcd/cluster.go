@@ -78,7 +78,7 @@ func (c *Cluster) Create(ctx context.Context) {
 	}
 
 	c.Logger.Printf("Checking %d nodes etcd is available through VIP", c.ClusterSpec.Nodes)
-	c.VerifyEtcdThroughVIP(ctx, time.Minute)
+	c.VerifyEtcdThroughVIP(ctx, 15*time.Second)
 }
 
 func (c *Cluster) initKindCluster() {
