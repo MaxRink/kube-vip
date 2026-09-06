@@ -49,7 +49,8 @@ type Processor struct {
 	intfMgr *networkinterface.Manager
 	arpMgr  *arp.Manager
 
-	leaseMgr *lease.Manager
+	leaseMgr    *lease.Manager
+	newInstance func(context.Context, *v1.Service, *sync.WaitGroup) (*instance.Instance, error)
 
 	// nodeLabelManager is the manager for the node labels
 	nodeLabelManager node.Labeler

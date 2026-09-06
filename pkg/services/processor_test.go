@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/kube-vip/kube-vip/pkg/instance"
 	"github.com/kube-vip/kube-vip/pkg/kubevip"
 	"github.com/kube-vip/kube-vip/pkg/lease"
+	"github.com/kube-vip/kube-vip/pkg/node/noop"
 	"github.com/kube-vip/kube-vip/pkg/servicecontext"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -71,18 +73,17 @@ func loadBalancerService(policy v1.ServiceExternalTrafficPolicy, forceElection b
 	}
 }
 
-func TestAddOrModifyThenDeleteIsIdempotentAcrossElectionModes(t *testing.T) {
+func TestAddOrModifyFiltersElectionModesWithPreloadedService(t *testing.T) {
 	tests := []struct {
 		name       string
 		forcedOnly bool
 		force      bool
 		policy     v1.ServiceExternalTrafficPolicy
-		selected   bool
 	}{
-		{name: "global cluster", policy: v1.ServiceExternalTrafficPolicyCluster, selected: true},
-		{name: "global local", policy: v1.ServiceExternalTrafficPolicyLocal, selected: true},
-		{name: "per service cluster", forcedOnly: true, force: true, policy: v1.ServiceExternalTrafficPolicyCluster, selected: true},
-		{name: "per service local", forcedOnly: true, force: true, policy: v1.ServiceExternalTrafficPolicyLocal, selected: true},
+		{name: "global cluster", policy: v1.ServiceExternalTrafficPolicyCluster},
+		{name: "global local", policy: v1.ServiceExternalTrafficPolicyLocal},
+		{name: "per service cluster", forcedOnly: true, force: true, policy: v1.ServiceExternalTrafficPolicyCluster},
+		{name: "per service local", forcedOnly: true, force: true, policy: v1.ServiceExternalTrafficPolicyLocal},
 		{name: "global skips forced service", force: true, policy: v1.ServiceExternalTrafficPolicyCluster},
 		{name: "per service skips ordinary service", forcedOnly: true, policy: v1.ServiceExternalTrafficPolicyCluster},
 	}
@@ -98,36 +99,56 @@ func TestAddOrModifyThenDeleteIsIdempotentAcrossElectionModes(t *testing.T) {
 				t.Fatalf("AddOrModify returned error: %v", err)
 			}
 
-			if !test.selected {
-				if _, ok := p.svcMap.Load(service.UID); !ok || len(p.ServiceInstances) != 1 {
-					t.Fatal("an event for the other election mode changed the tracked service")
-				}
+			if _, ok := p.svcMap.Load(service.UID); !ok || len(p.ServiceInstances) != 1 {
+				t.Fatal("filtering changed the preloaded service")
+			}
+			if test.forcedOnly != test.force {
 				if err := p.Delete(watch.Event{Type: watch.Deleted, Object: service}, test.forcedOnly); err != nil {
 					t.Fatalf("filtered Delete returned error: %v", err)
 				}
-				return
-			}
-
-			if err := p.Delete(watch.Event{Type: watch.Deleted, Object: service}, test.forcedOnly); err != nil {
-				t.Fatalf("first Delete returned error: %v", err)
-			}
-			if svcCtx.Ctx.Err() == nil {
-				t.Fatal("Delete did not cancel the service context")
-			}
-			if _, ok := p.svcMap.Load(service.UID); ok {
-				t.Fatal("Delete left the service context tracked")
-			}
-			if len(p.ServiceInstances) != 0 {
-				t.Fatalf("tracked service instance count = %d, want 0", len(p.ServiceInstances))
-			}
-
-			if err := p.Delete(watch.Event{Type: watch.Deleted, Object: service}, test.forcedOnly); err != nil {
-				t.Fatalf("second Delete returned error: %v", err)
-			}
-			if len(p.ServiceInstances) != 0 {
-				t.Fatal("second Delete changed the already empty service list")
+				if svcCtx.Ctx.Err() != nil || len(p.ServiceInstances) != 1 {
+					t.Fatal("filtered Delete changed the preloaded service")
+				}
 			}
 		})
+	}
+}
+
+func TestAddThenDeleteServiceFromEmptyState(t *testing.T) {
+	service := loadBalancerService(v1.ServiceExternalTrafficPolicyCluster, false)
+	p := &Processor{
+		config:           &kubevip.Config{DisableServiceUpdates: true},
+		leaseMgr:         lease.NewManager(),
+		nodeLabelManager: noop.NewManager(),
+		newInstance: func(_ context.Context, service *v1.Service, _ *sync.WaitGroup) (*instance.Instance, error) {
+			return &instance.Instance{ServiceSnapshot: service.DeepCopy()}, nil
+		},
+	}
+	svcCtx := servicecontext.New(context.Background())
+	p.svcMap.Store(service.UID, svcCtx)
+
+	if err := p.addService(context.Background(), nil, service, &sync.WaitGroup{}); err != nil {
+		t.Fatalf("addService returned error: %v", err)
+	}
+	if len(p.ServiceInstances) != 1 || !p.ServiceInstances[0].AddCalled {
+		t.Fatalf("added instances = %#v, want one active instance", p.ServiceInstances)
+	}
+
+	if err := p.Delete(watch.Event{Type: watch.Deleted, Object: service}, false); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	if svcCtx.Ctx.Err() == nil {
+		t.Fatal("Delete did not cancel the service context")
+	}
+	if _, ok := p.svcMap.Load(service.UID); ok {
+		t.Fatal("Delete left the service context tracked")
+	}
+	if len(p.ServiceInstances) != 0 {
+		t.Fatalf("tracked service instance count = %d, want 0", len(p.ServiceInstances))
+	}
+
+	if err := p.Delete(watch.Event{Type: watch.Deleted, Object: service}, false); err != nil {
+		t.Fatalf("second Delete returned error: %v", err)
 	}
 }
 

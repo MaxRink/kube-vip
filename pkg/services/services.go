@@ -175,7 +175,11 @@ func (p *Processor) addService(ctx context.Context, inst *instance.Instance, svc
 
 	var err error
 	if inst == nil {
-		inst, err = instance.NewInstance(ctx, svc, p.config, p.intfMgr, p.arpMgr, p.routeMgr, p.nodeLabelManager, wg)
+		if p.newInstance != nil {
+			inst, err = p.newInstance(ctx, svc, wg)
+		} else {
+			inst, err = instance.NewInstance(ctx, svc, p.config, p.intfMgr, p.arpMgr, p.routeMgr, p.nodeLabelManager, wg)
+		}
 		if err != nil {
 			return err
 		}
