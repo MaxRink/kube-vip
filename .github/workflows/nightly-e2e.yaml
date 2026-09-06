@@ -42,7 +42,12 @@ jobs:
             separator=',\n'
           done
           printf '\n  },\n  "metrics_enabled": true\n}\n' >> "$REPORT"
-          grep -q -- '- ":2112"' testing/e2e/kube-vip.yaml.tmpl
+          for template in testing/e2e/kube-vip.yaml.tmpl testing/e2e/kube-vip-routing-table.yaml.tmpl; do
+            grep -Fq -- '- "{{ .PrometheusHTTPServer }}"' "$template"
+          done
+          grep -q 'PrometheusHTTPServer:.*":2112"' testing/e2e/e2e_faults_cp_test.go
+          grep -q 'PrometheusHTTPServer:.*":2112"' testing/e2e/e2e_matrix_test.go
+          grep -q 'PrometheusHTTPServer:.*":2112"' testing/e2e/e2e_scale_test.go
           {
             echo '### Nightly preflight'
             echo 'All Make targets exist, each selected suite has specs, and metrics are enabled.'
