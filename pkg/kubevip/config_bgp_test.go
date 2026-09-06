@@ -6,6 +6,8 @@ import (
 )
 
 func TestParseBGPPeerConfig(t *testing.T) {
+	t.Parallel()
+
 	type args struct {
 		config string
 	}
@@ -103,6 +105,8 @@ func TestParseBGPPeerConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			gotBgpPeers, err := ParseBGPPeerConfig(tt.args.config)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParseBGPPeerConfig() error = \n%v, wantErr \n%v %v", err, tt.wantErr, gotBgpPeers)

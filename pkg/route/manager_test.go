@@ -6,7 +6,11 @@ import (
 )
 
 func Test_SingleAddDel(t *testing.T) {
-	t.Run("Add and delete single route", func(_ *testing.T) {
+	t.Parallel()
+
+	t.Run("Add and delete single route", func(t *testing.T) {
+		t.Parallel()
+
 		m := NewManager()
 		if m == nil { // nolint
 			t.Error("failed to create manager")
@@ -46,7 +50,11 @@ func Test_SingleAddDel(t *testing.T) {
 }
 
 func Test_MultipleAddDel(t *testing.T) {
-	t.Run("Add and delete same route multiple times", func(_ *testing.T) {
+	t.Parallel()
+
+	t.Run("Add and delete same route multiple times", func(t *testing.T) {
+		t.Parallel()
+
 		m := NewManager()
 		if m == nil {
 			t.Error("failed to create manager")
@@ -109,7 +117,11 @@ func Test_MultipleAddDel(t *testing.T) {
 }
 
 func Test_MultipleRoutesAddDel(t *testing.T) {
-	t.Run("Add and delete multiple routes multiple times", func(_ *testing.T) {
+	t.Parallel()
+
+	t.Run("Add and delete multiple routes multiple times", func(t *testing.T) {
+		t.Parallel()
+
 		m := NewManager()
 		if m == nil {
 			t.Error("failed to create manager")
