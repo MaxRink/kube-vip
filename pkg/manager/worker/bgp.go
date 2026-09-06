@@ -54,33 +54,30 @@ func (b *BGP) Configure(ctx context.Context, _ *sync.WaitGroup) error {
 	}
 
 	log.Info("Starting the BGP server to advertise VIP routes to BGP peers")
-	if err := b.bgpServer.Start(ctx, func(p *apiutil.WatchEventMessage_PeerEvent) {
-		if p.Type != apiutil.PEER_EVENT_STATE {
-			return
-		}
-
-		ipaddr := p.Peer.State.NeighborAddress.String()
-
-		port := 179
-		peerDescription := net.JoinHostPort(ipaddr, strconv.Itoa(port))
-
-		for stateName, stateValue := range api.PeerState_SessionState_value {
-			metricValue := 0.0
-			if int(p.Peer.State.SessionState) == int(stateValue)-1 {
-
-				metricValue = 1
-			}
-
-			metrics.BGPSessionInfoGauge.With(prometheus.Labels{
-				"state": stateName,
-				"peer":  peerDescription,
-			}).Set(metricValue)
-		}
-	}); err != nil {
+	if err := b.bgpServer.Start(ctx, updateBGPSessionMetric); err != nil {
 		return fmt.Errorf("starting BGP server: %w", err)
 	}
 
 	return nil
+}
+
+func updateBGPSessionMetric(p *apiutil.WatchEventMessage_PeerEvent) {
+	if p.Type != apiutil.PEER_EVENT_STATE {
+		return
+	}
+
+	peerDescription := net.JoinHostPort(p.Peer.State.NeighborAddress.String(), strconv.Itoa(179))
+	for stateName, stateValue := range api.PeerState_SessionState_value {
+		metricValue := 0.0
+		if int(p.Peer.State.SessionState) == int(stateValue)-1 {
+			metricValue = 1
+		}
+
+		metrics.BGPSessionInfoGauge.With(prometheus.Labels{
+			"state": stateName,
+			"peer":  peerDescription,
+		}).Set(metricValue)
+	}
 }
 
 func (b *BGP) Cleanup() {
