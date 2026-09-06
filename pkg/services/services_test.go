@@ -425,7 +425,6 @@ func TestGenerateLabelsFromService(t *testing.T) {
 	}
 }
 
-
 func TestConfigureServiceDoesNotOverwriteActiveEndpoint(t *testing.T) {
 	const selectedEndpoint = "172.30.2.40"
 

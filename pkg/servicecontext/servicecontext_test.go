@@ -230,7 +230,6 @@ func TestConcurrentStateTransitions(t *testing.T) {
 	}
 }
 
-
 func TestNewContextCancellation(t *testing.T) {
 	parent, cancelParent := context.WithCancel(context.Background())
 	ctx := New(parent)
