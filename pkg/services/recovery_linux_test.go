@@ -29,7 +29,11 @@ const recoveryProtocol = 248
 // skipping when it cannot enter a network namespace.
 var requireNetworkNamespaces = os.Getenv("KUBE_VIP_REQUIRE_NETNS") != ""
 
-func TestRecoverServiceAddressesUsesLeaseHolderIdentity(t *testing.T) {
+func TestRecoverAddressesUsesLeaseOwnership(t *testing.T) {
+	annotations, err := kubevip.WithLeaseVIPs(nil, "release_b", recoveryProtocol, []string{"192.0.2.20"})
+	if err != nil {
+		t.Fatalf("WithLeaseVIPs() error = %v", err)
+	}
 	for _, test := range []struct {
 		name   string
 		holder string
@@ -75,16 +79,22 @@ func TestRecoverServiceAddressesUsesLeaseHolderIdentity(t *testing.T) {
 			if err := netlink.LinkSetUp(link); err != nil {
 				t.Fatalf("bringing test interface up: %v", err)
 			}
-			address, err := netlink.ParseAddr("192.0.2.10/32")
-			if err != nil {
-				t.Fatalf("parsing test address: %v", err)
-			}
-			address.Protocol = recoveryProtocol
-			if err := netlink.AddrReplace(link, address); err != nil {
-				t.Fatalf("adding tagged test address: %v", err)
+			for _, value := range []string{"192.0.2.10/32", "192.0.2.20/32"} {
+				address, err := netlink.ParseAddr(value)
+				if err != nil {
+					t.Fatalf("parsing test address %q: %v", value, err)
+				}
+				address.Protocol = recoveryProtocol
+				if err := netlink.AddrReplace(link, address); err != nil {
+					t.Fatalf("adding tagged test address %q: %v", value, err)
+				}
 			}
 
-			clientSet := recoveryTestClient(t, test.holder)
+			localHolder := "node-a"
+			clientSet := recoveryTestClientWithLeases(t, test.holder, []coordinationv1.Lease{{
+				ObjectMeta: metav1.ObjectMeta{Name: "release-b", Namespace: "other", Annotations: annotations},
+				Spec:       coordinationv1.LeaseSpec{HolderIdentity: &localHolder},
+			}})
 			processor := &Processor{
 				config: &kubevip.Config{
 					EnableServicesElection: true,
@@ -104,14 +114,15 @@ func TestRecoverServiceAddressesUsesLeaseHolderIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listing test addresses: %v", err)
 			}
-			found := false
+			found := make(map[string]bool)
 			for _, configured := range addresses {
-				if configured.IP.String() == "192.0.2.10" {
-					found = true
-				}
+				found[configured.IP.String()] = true
 			}
-			if found != test.remain {
-				t.Fatalf("tagged address present = %t, want %t", found, test.remain)
+			if found["192.0.2.10"] != test.remain {
+				t.Fatalf("Service address present = %t, want %t", found["192.0.2.10"], test.remain)
+			}
+			if !found["192.0.2.20"] {
+				t.Fatal("tagged address owned by another local kube-vip instance was removed")
 			}
 		})
 	}
