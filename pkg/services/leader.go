@@ -126,9 +126,6 @@ func (p *Processor) StartServicesLeaderElection(svcCtx *servicecontext.Context, 
 			log.Error("error on stopped leading", "error", err)
 		}
 
-		// wait for leaderelection to be finished
-		<-svcLease.Ctx.Done()
-
 		return nil
 	}
 
@@ -185,6 +182,9 @@ func (p *Processor) StartServicesLeaderElection(svcCtx *servicecontext.Context, 
 }
 
 func (p *Processor) onStartedLeading(svcCtx *servicecontext.Context, service *v1.Service, wg *sync.WaitGroup) error {
+	if !p.serviceContextCurrent(service.UID, svcCtx) {
+		return nil
+	}
 	err := p.SyncServices(svcCtx, service, wg, true)
 	if err != nil {
 		log.Error("service sync", "uid", service.UID, "err", err)
@@ -194,11 +194,14 @@ func (p *Processor) onStartedLeading(svcCtx *servicecontext.Context, service *v1
 }
 
 func (p *Processor) onStoppedLeading(svcCtx *servicecontext.Context, svcLease *lease.Lease, service *v1.Service) error {
+	unlockService := p.lockService(service.UID)
+	defer unlockService()
+
 	currentSvcCtx, err := p.getServiceContext(service.UID)
 	if err != nil {
 		return err
 	}
-	if currentSvcCtx != nil && currentSvcCtx != svcCtx {
+	if currentSvcCtx != svcCtx {
 		log.Debug("skipping cleanup from superseded service context", "service", service.Name, "uid", service.UID)
 		return nil
 	}
