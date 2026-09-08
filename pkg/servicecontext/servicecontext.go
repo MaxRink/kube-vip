@@ -21,16 +21,19 @@ type Context struct {
 	LeaderCancel       context.CancelFunc
 	// watchedService is the Service the service and endpoint watchers were started with.
 	// They keep using it, even after the instance is removed from the manager.
-	watchedService *v1.Service
+	watchedService   *v1.Service
+	watchingStopped  chan struct{}
+	watchingStopOnce sync.Once
 }
 
 func New(ctx context.Context) *Context {
 	// context and cancel stored for a future use, gosec linter disabled
 	svcCtx, svcCancel := context.WithCancel(ctx) //nolint:gosec
 	return &Context{
-		Ctx:            svcCtx,
-		Cancel:         svcCancel,
-		EndpointsReady: make(chan any),
+		Ctx:             svcCtx,
+		Cancel:          svcCancel,
+		EndpointsReady:  make(chan any),
+		watchingStopped: make(chan struct{}),
 	}
 }
 
@@ -144,4 +147,26 @@ func (ctx *Context) WaitForWatchingStopped(waitCtx context.Context) error {
 	case <-stopped:
 		return nil
 	}
+}
+
+func (ctx *Context) StartWatching() bool {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	if ctx.IsWatched {
+		return false
+	}
+	ctx.IsWatched = true
+	return true
+}
+
+func (ctx *Context) StopWatching() {
+	ctx.mu.Lock()
+	if !ctx.IsWatched {
+		ctx.mu.Unlock()
+		return
+	}
+	ctx.IsWatched = false
+	stopped := ctx.watchingStopped
+	ctx.mu.Unlock()
+	ctx.watchingStopOnce.Do(func() { close(stopped) })
 }
