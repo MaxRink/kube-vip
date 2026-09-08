@@ -8,7 +8,9 @@ import (
 	"github.com/kube-vip/kube-vip/pkg/instance"
 	"github.com/kube-vip/kube-vip/pkg/kubevip"
 	"github.com/kube-vip/kube-vip/pkg/lease"
+	"github.com/kube-vip/kube-vip/pkg/metrics"
 	"github.com/kube-vip/kube-vip/pkg/servicecontext"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -206,4 +208,70 @@ func TestSharedLeaseMemberCancellationDoesNotWaitForLeaseRetirement(t *testing.T
 	if _, ok := p.svcMap.Load(leader.UID); ok {
 		t.Fatal("final service context remained registered")
 	}
+}
+
+func TestStartServicesLeaderElectionMetricsLifecycleAndRetries(t *testing.T) {
+	p := &Processor{
+		config:   &kubevip.Config{LeaderElectionType: "test", PerServiceElectionOnDemand: true},
+		leaseMgr: lease.NewManager(),
+	}
+	service := &v1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "metrics", Namespace: "on-demand", UID: types.UID("metrics"),
+	}}
+	metrics.ServiceElectionAttemptsTotal.DeleteLabelValues(service.Namespace, service.Name)
+	defer metrics.ServiceElectionAttemptsTotal.DeleteLabelValues(service.Namespace, service.Name)
+
+	namespace, name := lease.ServiceName(service)
+	p.leaseMgr.Add(context.Background(), lease.NewID(p.config.LeaderElectionType, namespace, name))
+	svcCtx := servicecontext.New(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.StartServicesLeaderElection(svcCtx, service, nil, true) }()
+
+	deadline := time.Now().Add(time.Second)
+	for testutil.ToFloat64(metrics.ServiceElectionLoops.WithLabelValues(service.Namespace, service.Name)) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("on-demand election loop metric did not become active")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := testutil.ToFloat64(metrics.ServiceElectionAttemptsTotal.WithLabelValues(service.Namespace, service.Name)); got != 0 {
+		t.Fatalf("attempts before election invocation = %v, want 0", got)
+	}
+
+	svcCtx.SignalReadiness()
+	if err := <-done; err != nil {
+		t.Fatalf("first StartServicesLeaderElection() error = %v", err)
+	}
+	if got := testutil.ToFloat64(metrics.ServiceElectionAttemptsTotal.WithLabelValues(service.Namespace, service.Name)); got != 1 {
+		t.Fatalf("attempts after first invocation = %v, want 1", got)
+	}
+	if err := p.StartServicesLeaderElection(svcCtx, service, nil, true); err != nil {
+		t.Fatalf("second StartServicesLeaderElection() error = %v", err)
+	}
+	if got := testutil.ToFloat64(metrics.ServiceElectionAttemptsTotal.WithLabelValues(service.Namespace, service.Name)); got != 2 {
+		t.Fatalf("attempts after retry = %v, want 2", got)
+	}
+	svcCtx.Cancel()
+}
+
+func TestStartServicesLeaderElectionFullModeDoesNotTrackWrapperMetric(t *testing.T) {
+	p := &Processor{
+		config:   &kubevip.Config{EnableServicesElection: true, LeaderElectionType: "test"},
+		leaseMgr: lease.NewManager(),
+	}
+	service := &v1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "full-mode", Namespace: "metrics", UID: types.UID("full-mode"),
+	}}
+	namespace, name := lease.ServiceName(service)
+	svcLease := p.leaseMgr.Add(context.Background(), lease.NewID(p.config.LeaderElectionType, namespace, name))
+	svcLease.Cancel()
+	svcCtx := servicecontext.New(context.Background())
+	wrapperDone := metrics.TrackServiceElectionLoop(service.Namespace, service.Name)
+	defer wrapperDone()
+
+	_ = p.StartServicesLeaderElection(svcCtx, service, nil, true)
+	if got := testutil.ToFloat64(metrics.ServiceElectionLoops.WithLabelValues(service.Namespace, service.Name)); got != 1 {
+		t.Fatalf("full-mode loop gauge = %v, want wrapper-owned value 1", got)
+	}
+	svcCtx.Cancel()
 }
