@@ -171,3 +171,94 @@ func TestDataplaneMetricsRegister(t *testing.T) {
 		}
 	}
 }
+
+func TestPR14CMetricsRegisterAndTrack(t *testing.T) {
+	BGPRoutesAdvertised.Reset()
+	BGPRouteOperationsTotal.Reset()
+	EgressRules.Reset()
+	EgressOperationsTotal.Reset()
+	WatcherFailuresTotal.Reset()
+	BGPSessionInfoGauge.Reset()
+	UPNPMappings.Set(0)
+	t.Cleanup(func() {
+		BGPRoutesAdvertised.Reset()
+		BGPRouteOperationsTotal.Reset()
+		EgressRules.Reset()
+		EgressOperationsTotal.Reset()
+		WatcherFailuresTotal.Reset()
+		BGPSessionInfoGauge.Reset()
+		UPNPMappings.Set(0)
+	})
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(
+		BGPRoutesAdvertised,
+		BGPRouteOperationsTotal,
+		EgressRules,
+		EgressOperationsTotal,
+		WatcherFailuresTotal,
+		BGPSessionInfoGauge,
+		UPNPMappings,
+	)
+
+	BGPRoutesAdvertised.WithLabelValues("IPv4").Set(1)
+	BGPRouteOperationsTotal.WithLabelValues("add", "ok").Inc()
+	EgressRules.WithLabelValues("kube_vip_v4").Set(2)
+	EgressOperationsTotal.WithLabelValues("delete", "error").Inc()
+	WatcherFailuresTotal.WithLabelValues("service", "watch_error").Inc()
+	BGPSessionInfoGauge.WithLabelValues("ESTABLISHED", "127.0.0.1:179").Set(1)
+	UPNPMappings.Set(3)
+
+	if got := testutil.ToFloat64(BGPRoutesAdvertised.WithLabelValues("IPv4")); got != 1 {
+		t.Fatalf("BGP advertised route gauge is %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(EgressRules.WithLabelValues("kube_vip_v4")); got != 2 {
+		t.Fatalf("egress rule gauge is %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(UPNPMappings); got != 3 {
+		t.Fatalf("UPNP mapping gauge is %v, want 3", got)
+	}
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gathering PR-14c metrics: %v", err)
+	}
+	seen := make(map[string]bool, len(families))
+	for _, family := range families {
+		seen[family.GetName()] = true
+	}
+	for _, name := range []string{
+		"kube_vip_bgp_routes_advertised",
+		"kube_vip_bgp_route_operations_total",
+		"kube_vip_egress_rules",
+		"kube_vip_egress_operations_total",
+		"kube_vip_watcher_failures_total",
+		"kube_vip_manager_bgp_session_info",
+		"kube_vip_upnp_mappings",
+	} {
+		if !seen[name] {
+			t.Errorf("PR-14c metric %q was not registered", name)
+		}
+	}
+}
+
+func TestSetEgressRulesDeletesEmptyTableSeries(t *testing.T) {
+	EgressRules.Reset()
+	t.Cleanup(EgressRules.Reset)
+
+	SetEgressRules("kube_vip_v4", 2)
+	if got := testutil.ToFloat64(EgressRules.WithLabelValues("kube_vip_v4")); got != 2 {
+		t.Fatalf("egress rules = %v, want 2", got)
+	}
+	SetEgressRules("kube_vip_v4", 0)
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(EgressRules)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gathering egress rules: %v", err)
+	}
+	if len(families) != 0 {
+		t.Fatalf("empty egress table series remains: %v", families)
+	}
+}
