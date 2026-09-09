@@ -1947,21 +1947,33 @@ func testServiceCommonLease(ctx context.Context, svcName, lbAddress, leaseNamesp
 		}
 	}
 
-	container := e2e.GetLeaseHolder(ctx, lease, leaseNamespace, client)
-
 	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	Expect(err).ToNot(HaveOccurred())
 
+	nodeNames := make([]string, 0, len(nodes.Items))
 	for _, node := range nodes.Items {
-		expected := node.Name == container
-		for _, addr := range lbAddresses {
-			Expect(checkIPAddress(addr, node.Name, expected)).To(BeTrue())
-		}
+		nodeNames = append(nodeNames, node.Name)
 	}
 
-	for i := range numberOfServices {
-		expected := i < numberOfServices-1
+	getHolder := func() (string, error) {
+		currentLease, err := client.CoordinationV1().Leases(leaseNamespace).Get(ctx, lease, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		if currentLease.Spec.HolderIdentity == nil {
+			return "", nil
+		}
+		return *currentLease.Spec.HolderIdentity, nil
+	}
+	checkOwnership := func() (string, error) {
+		return e2e.CheckCommonLeaseOwnership(getHolder, nodeNames, lbAddresses, func(address, node string) bool {
+			return e2e.CheckIPAddressPresence(address, node, true)
+		})
+	}
 
+	Eventually(checkOwnership, "120s", "1s").ShouldNot(BeEmpty())
+
+	for i := range numberOfServices {
 		By(fmt.Sprintf("deleting service %q", services[i]))
 
 		err := client.CoreV1().Services(dsNamespace).Delete(ctx, services[i], metav1.DeleteOptions{})
@@ -1973,15 +1985,30 @@ func testServiceCommonLease(ctx context.Context, svcName, lbAddress, leaseNamesp
 			return err
 		}).ShouldNot(Succeed())
 
-		for _, addr := range lbAddresses {
-			for _, node := range nodes.Items {
-				if node.Name == container {
-					Expect(checkIPAddress(addr, node.Name, expected)).To(BeTrue())
-				} else {
-					Expect(checkIPAddress(addr, node.Name, false)).To(BeTrue())
+		if i < numberOfServices-1 {
+			Eventually(checkOwnership, "120s", "1s").ShouldNot(BeEmpty())
+			continue
+		}
+
+		Eventually(func() error {
+			currentLease, err := client.CoordinationV1().Leases(leaseNamespace).Get(ctx, lease, metav1.GetOptions{})
+			if err := e2e.CheckCommonLeaseRetired(currentLease, err); err != nil {
+				return fmt.Errorf("common lease %s/%s is not retired: %w", leaseNamespace, lease, err)
+			}
+
+			var presentAddresses []string
+			for _, node := range nodeNames {
+				for _, addr := range lbAddresses {
+					if e2e.CheckIPAddressPresence(addr, node, false) == false {
+						presentAddresses = append(presentAddresses, fmt.Sprintf("%q on %q", addr, node))
+					}
 				}
 			}
-		}
+			if len(presentAddresses) > 0 {
+				return fmt.Errorf("addresses are still present: %s", strings.Join(presentAddresses, ", "))
+			}
+			return nil
+		}, "120s", "1s").Should(Succeed())
 	}
 }
 
