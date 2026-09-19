@@ -103,6 +103,7 @@ EventLoop:
 		select {
 		case <-ctx.Done():
 			log.Info("global context done")
+			break EventLoop
 		case <-watcherCtx.Done():
 			log.Info("WatcheConotext done")
 			break EventLoop
@@ -127,10 +128,10 @@ EventLoop:
 				// Un-used
 			case watch.Error:
 				log.Error("Error attempting to watch Kubernetes services")
+				metrics.WatcherFailuresTotal.WithLabelValues("service", "watch_error").Inc()
 				watchErr := utils.WatchError(event.Object)
 				log.Error("services", "err", watchErr)
 				return utils.WrapPanicError(watchErr, "service watch failed")
-			default:
 			}
 		}
 	}
@@ -141,6 +142,7 @@ EventLoop:
 	if watcherErr := context.Cause(watcherCtx); watcherErr != nil {
 		return watcherErr
 	}
+	metrics.WatcherFailuresTotal.WithLabelValues("service", "channel_closed").Inc()
 	log.Warn("Stopping watching services for type: LoadBalancer in all namespaces")
 	return utils.NewPanicError("service watch channel closed unexpectedly")
 }
