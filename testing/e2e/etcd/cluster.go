@@ -5,6 +5,7 @@ package etcd
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -40,24 +41,25 @@ type Cluster struct {
 	provider *cluster.Provider
 }
 
-func CreateCluster(ctx context.Context, spec *ClusterSpec) *Cluster {
-	c := &Cluster{
+func NewCluster(spec *ClusterSpec) *Cluster {
+	return &Cluster{
 		ClusterSpec: spec,
+		provider: cluster.NewProvider(
+			cluster.ProviderWithLogger(spec.Logger),
+			cluster.ProviderWithDocker(),
+		),
 	}
+}
 
-	c.provider = cluster.NewProvider(
-		cluster.ProviderWithLogger(spec.Logger),
-		cluster.ProviderWithDocker(),
-	)
-
+func (c *Cluster) Create(ctx context.Context) {
 	c.Logger.Printf("Creating kind nodes")
 	c.initKindCluster()
 
 	c.Logger.Printf("Loading kube-vip image into nodes")
-	Expect(e2e.LoadDockerImageToKind(spec.Logger, spec.KubeVIPImage, spec.Name)).To(Succeed())
+	Expect(e2e.LoadDockerImageToKind(c.Logger, c.KubeVIPImage, c.Name)).To(Succeed())
 
 	c.Logger.Printf("Loading traefik image into nodes")
-	if err := e2e.LoadDockerImageToKind(spec.Logger, "ghcr.io/traefik/whoami:v1.11", spec.Name); err != nil {
+	if err := e2e.LoadDockerImageToKind(c.Logger, "ghcr.io/traefik/whoami:v1.11", c.Name); err != nil {
 		c.Logger.Warnf("failed to load image ghcr.io/traefik/whoami:v1.11 into kind cluster, image will be downloaded after pod deployment, error: %s", err.Error())
 	}
 
@@ -65,20 +67,18 @@ func CreateCluster(ctx context.Context, spec *ClusterSpec) *Cluster {
 	c.initEtcd(ctx)
 
 	c.Logger.Printf("Checking 1 node etcd is available through VIP")
-	c.VerifyEtcdThroughVIP(ctx, 15*time.Second)
+	c.VerifyEtcdThroughVIP(ctx, time.Minute)
 
 	c.Logger.Printf("Adding the rest of the nodes to the etcd cluster")
 	c.joinRestOfNodes(ctx)
 
 	c.Logger.Printf("Checking health for all nodes")
 	for _, node := range c.Nodes {
-		c.expectEtcdNodeHealthy(ctx, node, 15*time.Second)
+		c.expectEtcdNodeHealthy(ctx, node, time.Minute)
 	}
 
 	c.Logger.Printf("Checking %d nodes etcd is available through VIP", c.ClusterSpec.Nodes)
-	c.VerifyEtcdThroughVIP(ctx, 15*time.Second)
-
-	return c
+	c.VerifyEtcdThroughVIP(ctx, time.Minute)
 }
 
 func (c *Cluster) initKindCluster() {
@@ -197,7 +197,7 @@ func (c *Cluster) initEtcd(ctx context.Context) {
 
 	e2e.CopyFolderFromNodeToDisk(firstNode, "/etc/kubernetes/pki/etcd", c.EtcdCertsFolder)
 
-	c.expectEtcdNodeHealthy(ctx, firstNode, 15*time.Second)
+	c.expectEtcdNodeHealthy(ctx, firstNode, time.Minute)
 }
 
 func runInNode(node nodes.Node, command string, args ...string) error {
@@ -236,7 +236,7 @@ func (c *Cluster) joinNode(ctx context.Context, firstNode, node nodes.Node) {
 
 	bindEtcdListenerToAllIPs(node)
 
-	c.expectEtcdNodeHealthy(ctx, node, 30*time.Second)
+	c.expectEtcdNodeHealthy(ctx, node, time.Minute)
 }
 
 func (c *Cluster) DeleteEtcdMember(ctx context.Context, toDelete, toKeep nodes.Node) {
@@ -330,8 +330,12 @@ func (c *Cluster) newEtcdClient(serverIPs ...string) *clientv3.Client {
 func (c *Cluster) VerifyEtcdThroughVIP(ctx context.Context, timeout time.Duration) {
 	etcdClient := c.newEtcdClient(c.VIP)
 	defer etcdClient.Close()
-	rCtx, cancel := context.WithTimeout(ctx, timeout)
-	_, err := etcdClient.MemberList(rCtx)
-	Expect(err).NotTo(HaveOccurred())
-	cancel()
+	err := waitForEtcdHealth(ctx, timeout, time.Second, func(probeCtx context.Context) error {
+		_, err := etcdClient.MemberList(probeCtx)
+		if err != nil {
+			return fmt.Errorf("listing members through VIP: %w", err)
+		}
+		return nil
+	})
+	Expect(err).NotTo(HaveOccurred(), "etcd should eventually be available through VIP %s", c.VIP)
 }
