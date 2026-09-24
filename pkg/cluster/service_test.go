@@ -28,7 +28,7 @@ func TestBGPHealthCheckLoop_AnnouncesOnHealthy(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	startVipService(t, newTestConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
+	startVipService(t, newBGPConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
 
 	expectEventually(t, func() bool { return bgpManager.isAnnounced() },
 		"route should be announced")
@@ -40,7 +40,7 @@ func TestBGPHealthCheckLoop_NoAnnouncementUntilHealthy(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	startVipService(t, newTestConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
+	startVipService(t, newBGPConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
 
 	expectConsistently(t, func() bool { return !bgpManager.isAnnounced() },
 		2*time.Second, "route should not be announced while unhealthy")
@@ -56,7 +56,7 @@ func TestBGPHealthCheckLoop_WithdrawsAfterThreshold(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	cfg := newTestConfig(healthcheck.server.URL, healthcheck.caPath)
+	cfg := newBGPConfig(healthcheck.server.URL, healthcheck.caPath)
 	cfg.ControlPlaneHealthCheck.FailureThreshold = 3
 	startVipService(t, cfg, bgpManager)
 
@@ -78,7 +78,7 @@ func TestBGPHealthCheckLoop_ReAnnouncesOnRecovery(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	cfg := newTestConfig(healthcheck.server.URL, healthcheck.caPath)
+	cfg := newBGPConfig(healthcheck.server.URL, healthcheck.caPath)
 	cfg.ControlPlaneHealthCheck.FailureThreshold = 1
 	startVipService(t, cfg, bgpManager)
 
@@ -100,17 +100,17 @@ func TestBGPHealthCheckLoop_StopsOnContextCancel(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	cancelContext, vipServiceDone := startVipService(t, newTestConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
+	cancelContext := startVipService(t, newBGPConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
 
 	expectEventually(t, func() bool { return bgpManager.isAnnounced() },
 		"route should be announced")
 
 	cancelContext()
 
-	select {
-	case <-vipServiceDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("vipService did not stop after context cancellation")
+	withdrawal := bgpManager.waitForWithdrawal(t)
+	assertCleanupContext(t, withdrawal)
+	if bgpManager.isAnnounced() {
+		t.Fatal("health-checked BGP route remained announced after context cancellation")
 	}
 }
 
@@ -121,7 +121,7 @@ func TestBGPHealthCheckLoop_RetriesAddHostOnFailure(t *testing.T) {
 
 	bgpManager := newMockBGPRouteManager()
 	bgpManager.setAddErr(errTestAddHost)
-	startVipService(t, newTestConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
+	startVipService(t, newBGPConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
 
 	expectConsistently(t, func() bool { return !bgpManager.isAnnounced() },
 		2*time.Second, "route should not be announced while AddHost errors")
@@ -137,7 +137,7 @@ func TestBGPHealthCheckLoop_RetriesDelHostOnFailure(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	cfg := newTestConfig(healthcheck.server.URL, healthcheck.caPath)
+	cfg := newBGPConfig(healthcheck.server.URL, healthcheck.caPath)
 	cfg.ControlPlaneHealthCheck.FailureThreshold = 1
 	startVipService(t, cfg, bgpManager)
 
@@ -195,9 +195,8 @@ func (e *testError) Error() string { return e.msg }
 // startVipService launches vipService in a goroutine with a mock network and
 // registers a cleanup to cancel the context and wait for it to finish.
 // Uses InitCluster so the real code parses certs for the BGP health check client.
-func startVipService(t *testing.T, cfg *kubevip.Config, bgpManager *mockBGPRouteManager) (context.CancelFunc, <-chan struct{}) {
+func startVipService(t *testing.T, cfg *kubevip.Config, bgpManager *mockBGPRouteManager) context.CancelFunc {
 	t.Helper()
-
 	c, err := cluster.InitCluster(cfg, true, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("InitCluster: %v", err)
@@ -217,7 +216,7 @@ func startVipService(t *testing.T, cfg *kubevip.Config, bgpManager *mockBGPRoute
 		<-done
 	})
 
-	return cancel, done
+	return cancel
 }
 
 // startRoutingTableVipService launches vipService in routing-table mode with a
@@ -247,14 +246,14 @@ func startRoutingTableVipService(t *testing.T, cfg *kubevip.Config, network *moc
 }
 
 func newRoutingTableConfig(url, caPath string) *kubevip.Config {
-	cfg := newTestConfig(url, caPath)
+	cfg := newBGPConfig(url, caPath)
 	cfg.EnableBGP = false
 	cfg.EnableRoutingTable = true
 	cfg.BackendHealthCheckInterval = 1
 	return cfg
 }
 
-func newTestConfig(url, caPath string) *kubevip.Config {
+func newBGPConfig(url, caPath string) *kubevip.Config {
 	return &kubevip.Config{
 		EnableBGP: true,
 		ControlPlaneHealthCheck: kubevip.HealthCheck{
@@ -274,10 +273,19 @@ type mockBGPRouteManager struct {
 	announced map[string]bool
 	addErr    error
 	delErr    error
+	withdrawn chan withdrawalCall
+}
+
+type withdrawalCall struct {
+	contextErr  error
+	hasDeadline bool
 }
 
 func newMockBGPRouteManager() *mockBGPRouteManager {
-	return &mockBGPRouteManager{announced: make(map[string]bool)}
+	return &mockBGPRouteManager{
+		announced: make(map[string]bool),
+		withdrawn: make(chan withdrawalCall, 10),
+	}
 }
 
 func (m *mockBGPRouteManager) AddHost(_ context.Context, addr string, _ string) error {
@@ -290,14 +298,39 @@ func (m *mockBGPRouteManager) AddHost(_ context.Context, addr string, _ string) 
 	return nil
 }
 
-func (m *mockBGPRouteManager) DelHost(_ context.Context, addr string, _ string) error {
+func (m *mockBGPRouteManager) DelHost(ctx context.Context, addr string, _ string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.delErr != nil {
-		return m.delErr
+	delErr := m.delErr
+	if delErr != nil {
+		m.mu.Unlock()
+		return delErr
 	}
 	delete(m.announced, addr)
+	m.mu.Unlock()
+	_, hasDeadline := ctx.Deadline()
+	m.withdrawn <- withdrawalCall{contextErr: ctx.Err(), hasDeadline: hasDeadline}
 	return nil
+}
+
+func (m *mockBGPRouteManager) waitForWithdrawal(t *testing.T) withdrawalCall {
+	t.Helper()
+	select {
+	case call := <-m.withdrawn:
+		return call
+	case <-time.After(5 * time.Second):
+		t.Fatal("route was not withdrawn")
+		return withdrawalCall{}
+	}
+}
+
+func assertCleanupContext(t *testing.T, call withdrawalCall) {
+	t.Helper()
+	if call.contextErr != nil {
+		t.Fatalf("withdrawal received canceled context: %v", call.contextErr)
+	}
+	if !call.hasDeadline {
+		t.Fatal("withdrawal context has no cleanup deadline")
+	}
 }
 
 func (m *mockBGPRouteManager) isAnnounced() bool {
