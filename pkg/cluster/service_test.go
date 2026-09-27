@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kube-vip/kube-vip/pkg/bgp"
 	"github.com/kube-vip/kube-vip/pkg/cluster"
 	"github.com/kube-vip/kube-vip/pkg/kubevip"
 	"github.com/kube-vip/kube-vip/pkg/route"
@@ -28,7 +29,7 @@ func TestBGPHealthCheckLoop_AnnouncesOnHealthy(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	startVipService(t, newTestConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
+	startVipService(t, newBGPConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
 
 	expectEventually(t, func() bool { return bgpManager.isAnnounced() },
 		"route should be announced")
@@ -40,7 +41,7 @@ func TestBGPHealthCheckLoop_NoAnnouncementUntilHealthy(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	startVipService(t, newTestConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
+	startVipService(t, newBGPConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
 
 	expectConsistently(t, func() bool { return !bgpManager.isAnnounced() },
 		2*time.Second, "route should not be announced while unhealthy")
@@ -56,7 +57,7 @@ func TestBGPHealthCheckLoop_WithdrawsAfterThreshold(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	cfg := newTestConfig(healthcheck.server.URL, healthcheck.caPath)
+	cfg := newBGPConfig(healthcheck.server.URL, healthcheck.caPath)
 	cfg.ControlPlaneHealthCheck.FailureThreshold = 3
 	startVipService(t, cfg, bgpManager)
 
@@ -78,7 +79,7 @@ func TestBGPHealthCheckLoop_ReAnnouncesOnRecovery(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	cfg := newTestConfig(healthcheck.server.URL, healthcheck.caPath)
+	cfg := newBGPConfig(healthcheck.server.URL, healthcheck.caPath)
 	cfg.ControlPlaneHealthCheck.FailureThreshold = 1
 	startVipService(t, cfg, bgpManager)
 
@@ -100,7 +101,7 @@ func TestBGPHealthCheckLoop_StopsOnContextCancel(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	cancelContext, vipServiceDone := startVipService(t, newTestConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
+	cancelContext, vipServiceDone := startVipService(t, newBGPConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
 
 	expectEventually(t, func() bool { return bgpManager.isAnnounced() },
 		"route should be announced")
@@ -121,7 +122,7 @@ func TestBGPHealthCheckLoop_RetriesAddHostOnFailure(t *testing.T) {
 
 	bgpManager := newMockBGPRouteManager()
 	bgpManager.setAddErr(errTestAddHost)
-	startVipService(t, newTestConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
+	startVipService(t, newBGPConfig(healthcheck.server.URL, healthcheck.caPath), bgpManager)
 
 	expectConsistently(t, func() bool { return !bgpManager.isAnnounced() },
 		2*time.Second, "route should not be announced while AddHost errors")
@@ -137,7 +138,7 @@ func TestBGPHealthCheckLoop_RetriesDelHostOnFailure(t *testing.T) {
 	t.Cleanup(healthcheck.server.Close)
 
 	bgpManager := newMockBGPRouteManager()
-	cfg := newTestConfig(healthcheck.server.URL, healthcheck.caPath)
+	cfg := newBGPConfig(healthcheck.server.URL, healthcheck.caPath)
 	cfg.ControlPlaneHealthCheck.FailureThreshold = 1
 	startVipService(t, cfg, bgpManager)
 
@@ -195,9 +196,8 @@ func (e *testError) Error() string { return e.msg }
 // startVipService launches vipService in a goroutine with a mock network and
 // registers a cleanup to cancel the context and wait for it to finish.
 // Uses InitCluster so the real code parses certs for the BGP health check client.
-func startVipService(t *testing.T, cfg *kubevip.Config, bgpManager *mockBGPRouteManager) (context.CancelFunc, <-chan struct{}) {
+func startVipService(t *testing.T, cfg *kubevip.Config, bgpServer bgp.BGPManager) (context.CancelFunc, <-chan struct{}) {
 	t.Helper()
-
 	c, err := cluster.InitCluster(cfg, true, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("InitCluster: %v", err)
@@ -208,7 +208,7 @@ func startVipService(t *testing.T, cfg *kubevip.Config, bgpManager *mockBGPRoute
 	done := make(chan struct{})
 
 	go func() {
-		_ = c.StartVipService(ctx, cfg, nil, bgpManager, func() {})
+		_ = c.StartVipService(ctx, cfg, nil, bgpServer, func() {})
 		close(done)
 	}()
 
@@ -223,7 +223,7 @@ func startVipService(t *testing.T, cfg *kubevip.Config, bgpManager *mockBGPRoute
 // startRoutingTableVipService launches vipService in routing-table mode with a
 // mock network and a real route.Manager (which only drives the mock network's
 // route methods, so no netlink calls happen). Registers cleanup to stop it.
-func startRoutingTableVipService(t *testing.T, cfg *kubevip.Config, network *mockNetwork) {
+func startRoutingTableVipService(t *testing.T, cfg *kubevip.Config, network *mockNetwork) (context.CancelFunc, <-chan struct{}) {
 	t.Helper()
 
 	c, err := cluster.InitCluster(cfg, true, nil, nil, route.NewManager(), nil)
@@ -244,17 +244,19 @@ func startRoutingTableVipService(t *testing.T, cfg *kubevip.Config, network *moc
 		cancel()
 		<-done
 	})
+
+	return cancel, done
 }
 
 func newRoutingTableConfig(url, caPath string) *kubevip.Config {
-	cfg := newTestConfig(url, caPath)
+	cfg := newBGPConfig(url, caPath)
 	cfg.EnableBGP = false
 	cfg.EnableRoutingTable = true
 	cfg.BackendHealthCheckInterval = 1
 	return cfg
 }
 
-func newTestConfig(url, caPath string) *kubevip.Config {
+func newBGPConfig(url, caPath string) *kubevip.Config {
 	return &kubevip.Config{
 		EnableBGP: true,
 		ControlPlaneHealthCheck: kubevip.HealthCheck{
@@ -318,13 +320,16 @@ func (m *mockBGPRouteManager) setDelErr(err error) {
 	m.mu.Unlock()
 }
 
-// mockNetwork implements vip.Network with no-op operations.
+// mockNetwork implements vip.Network with in-memory VIP and route state.
 type mockNetwork struct {
 	ip   string
 	cidr string
 
-	mu      sync.Mutex
-	present bool
+	mu               sync.Mutex
+	present          bool
+	routePresent     bool
+	deleteRouteCalls int
+	deleteRouteErr   error
 }
 
 func (m *mockNetwork) AddIP(bool, bool, ...int) (bool, error) {
@@ -344,9 +349,38 @@ func (m *mockNetwork) isPresent() bool {
 	defer m.mu.Unlock()
 	return m.present
 }
-func (m *mockNetwork) AddRoute(bool) (bool, error)     { return false, nil }
-func (m *mockNetwork) ReplaceRoute() error             { return nil }
-func (m *mockNetwork) DeleteRoute() error              { return nil }
+func (m *mockNetwork) AddRoute(bool) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.routePresent = true
+	return true, nil
+}
+func (m *mockNetwork) ReplaceRoute() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.routePresent = true
+	return nil
+}
+func (m *mockNetwork) DeleteRoute() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleteRouteCalls++
+	if m.deleteRouteErr != nil {
+		return m.deleteRouteErr
+	}
+	m.routePresent = false
+	return nil
+}
+func (m *mockNetwork) isRoutePresent() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.routePresent
+}
+func (m *mockNetwork) routeDeleteCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.deleteRouteCalls
+}
 func (m *mockNetwork) UpdateRoutes() (bool, error)     { return false, nil }
 func (m *mockNetwork) IsSet() (*netlink.Addr, error)   { return nil, nil }
 func (m *mockNetwork) IP() string                      { return m.ip }
