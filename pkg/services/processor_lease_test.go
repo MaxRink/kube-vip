@@ -2,7 +2,9 @@ package services
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/kube-vip/kube-vip/pkg/instance"
 	"github.com/kube-vip/kube-vip/pkg/kubevip"
@@ -13,6 +15,64 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 )
+
+func TestDeletedSharedVIPServiceRejectsRacingEndpointUpdate(t *testing.T) {
+	p := &Processor{}
+	first := servicecontext.New(context.Background())
+	second := servicecontext.New(context.Background())
+	const vip = "192.0.2.10"
+	references := map[string]map[string]bool{
+		vip: {"local-a": true, "local-b": true},
+	}
+
+	// Hold deletion's lifecycle section so the endpoint update is queued in
+	// the same state observed in the E2E failure.
+	p.lifecycleMutex.Lock()
+	var wg sync.WaitGroup
+	updated := make(chan bool, 1)
+	wg.Go(func() {
+		updated <- p.withActiveService(first, func() {
+			references[vip]["local-a"] = true
+		})
+	})
+
+	first.Cancel()
+	delete(references[vip], "local-a")
+	p.lifecycleMutex.Unlock()
+	wg.Wait()
+
+	if <-updated {
+		t.Fatal("endpoint update reconciled after its Service was cancelled")
+	}
+	if references[vip]["local-a"] {
+		t.Fatal("deleted Service restored its shared VIP reference")
+	}
+	if !references[vip]["local-b"] || second.Ctx.Err() != nil {
+		t.Fatal("deleting one Local Service disturbed the other shared VIP owner")
+	}
+}
+
+func TestOnStoppedLeadingWaitsForLifecycleLock(t *testing.T) {
+	p := &Processor{}
+	oldCtx := servicecontext.New(context.Background())
+	replacementCtx := servicecontext.New(context.Background())
+	uid := types.UID("service-uid")
+	p.svcMap.Store(uid, replacementCtx)
+	service := &v1.Service{ObjectMeta: metav1.ObjectMeta{UID: uid, Name: "example"}}
+
+	p.lifecycleMutex.Lock()
+	done := make(chan error, 1)
+	go func() { done <- p.onStoppedLeading(oldCtx, nil, service) }()
+	select {
+	case <-done:
+		t.Fatal("lost-leader cleanup bypassed the lifecycle lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+	p.lifecycleMutex.Unlock()
+	if err := <-done; err != nil {
+		t.Fatalf("onStoppedLeading returned error: %v", err)
+	}
+}
 
 func TestAddOrModifyStopsTrackedServiceWhenTypeChanges(t *testing.T) {
 	for _, ignored := range []bool{false, true} {
@@ -46,7 +106,7 @@ func TestAddOrModifyStopsTrackedServiceWhenTypeChanges(t *testing.T) {
 			p := &Processor{
 				config:           &kubevip.Config{},
 				leaseMgr:         lease.NewManager(),
-				ServiceInstances: []*instance.Instance{{ServiceSnapshot: tracked}},
+				ServiceInstances: []*instance.Instance{{ServiceUID: uid, ServiceSnapshot: tracked}},
 			}
 			svcCtx := servicecontext.New(context.Background())
 			p.svcMap.Store(uid, svcCtx)
@@ -191,7 +251,7 @@ func TestOnStoppedLeadingDoesNotDeleteReplacementContext(t *testing.T) {
 	oldCtx := servicecontext.New(context.Background())
 	replacementCtx := servicecontext.New(context.Background())
 	p.svcMap.Store(service.UID, replacementCtx)
-	replacementInstance := &instance.Instance{ServiceSnapshot: service.DeepCopy()}
+	replacementInstance := &instance.Instance{ServiceUID: service.UID, ServiceSnapshot: service.DeepCopy()}
 	p.ServiceInstances = []*instance.Instance{replacementInstance}
 
 	leaseNamespace, serviceLease := lease.ServiceName(service)
