@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -29,14 +30,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// BGPRouteManager allows to manage the routes announced by the BGP server.
-type BGPRouteManager interface {
-	AddHost(ctx context.Context, addr string, object string) error
-	DelHost(ctx context.Context, addr string, object string) error
-}
-
-func (cluster *Cluster) StartVipService(ctx context.Context, c *kubevip.Config, em *election.Manager,
-	bgpServer BGPRouteManager, killFunc func()) error {
+func (cluster *Cluster) StartVipService(ctx context.Context, c *kubevip.Config, em *election.Manager, bgpServer bgp.BGPManager, killFunc func()) error {
 
 	var err error
 
@@ -209,6 +203,7 @@ func (cluster *Cluster) StartVipService(ctx context.Context, c *kubevip.Config, 
 						} else if resp, doErr := cluster.healthCheckHTTPClient.Do(req); doErr != nil {
 							log.Error("health check request failed", "url", c.ControlPlaneHealthCheck.Address, "err", doErr)
 						} else {
+							_, _ = io.Copy(io.Discard, resp.Body)
 							resp.Body.Close()
 							healthy = resp.StatusCode == http.StatusOK
 							if !healthy {
@@ -282,18 +277,60 @@ func (cluster *Cluster) StartVipService(ctx context.Context, c *kubevip.Config, 
 
 	if c.EnableBGP {
 		<-ctx.Done()
+		if c.ControlPlaneHealthCheck.Address == "" {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			for i := range cluster.Network {
+				network := cluster.Network[i]
+				if err := bgpServer.DelHost(cleanupCtx, network.CIDR(), c.NodeName); err != nil {
+					log.Error("failed to withdraw route", "address", network.CIDR(), "error", err)
+				}
+			}
+		}
 	}
 
 	return nil
 }
 
-func (cluster *Cluster) bgpHealthCheckLoop(ctx context.Context, c *kubevip.Config, bgpServer BGPRouteManager, vipCIDR string) {
+func (cluster *Cluster) bgpHealthCheck(ctx context.Context, c *kubevip.Config) (bool, error) {
+	statusCode := 0
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.ControlPlaneHealthCheck.Address, nil)
+	if err != nil {
+		return false, fmt.Errorf("building request %v: %w", req, err)
+	} else {
+		resp, err := cluster.healthCheckHTTPClient.Do(req)
+		if err != nil {
+			return false, fmt.Errorf("checking control-plane: %w", err)
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		statusCode = resp.StatusCode
+	}
+	healthy := statusCode == http.StatusOK
+	if !healthy {
+		return healthy, fmt.Errorf("wrong status code: %d", statusCode)
+	}
+	return healthy, nil
+}
+
+func (cluster *Cluster) bgpHealthCheckLoop(ctx context.Context, c *kubevip.Config, bgpServer bgp.BGPManager, vipCIDR string) {
 	period := time.Duration(c.ControlPlaneHealthCheck.PeriodSeconds) * time.Second
 
 	consecutiveFailures := 0
 	routeAnnounced := false
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
+	withdrawOnCancel := func() {
+		if !routeAnnounced {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := bgpServer.DelHost(cleanupCtx, vipCIDR, c.NodeName); err != nil {
+			log.Error("BGP health check: failed to withdraw route", "cidr", vipCIDR, "err", err)
+		}
+	}
 
 	log.Info("Starting BGP health check",
 		"address", c.ControlPlaneHealthCheck.Address,
@@ -304,24 +341,7 @@ func (cluster *Cluster) bgpHealthCheckLoop(ctx context.Context, c *kubevip.Confi
 	)
 
 	for {
-		statusCode := 0
-		var healthErr error
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.ControlPlaneHealthCheck.Address, nil)
-		if err != nil {
-			healthErr = err
-		} else {
-			resp, err := cluster.healthCheckHTTPClient.Do(req)
-			if err != nil {
-				healthErr = err
-			} else {
-				defer resp.Body.Close()
-				statusCode = resp.StatusCode
-			}
-		}
-
-		healthy := healthErr == nil && statusCode == http.StatusOK
-
+		healthy, healthErr := cluster.bgpHealthCheck(ctx, c)
 		if healthy {
 			consecutiveFailures = 0
 			if !routeAnnounced {
@@ -336,10 +356,7 @@ func (cluster *Cluster) bgpHealthCheckLoop(ctx context.Context, c *kubevip.Confi
 			consecutiveFailures++
 			if healthErr != nil {
 				log.Warn("BGP health check failed", "address", c.ControlPlaneHealthCheck.Address, "consecutive", consecutiveFailures, "err", healthErr)
-			} else {
-				log.Warn("BGP health check failed", "address", c.ControlPlaneHealthCheck.Address, "consecutive", consecutiveFailures, "status", statusCode)
 			}
-
 			if consecutiveFailures >= c.ControlPlaneHealthCheck.FailureThreshold && routeAnnounced {
 				log.Warn("BGP health check threshold reached, withdrawing route", "failureThreshold", c.ControlPlaneHealthCheck.FailureThreshold, "cidr", vipCIDR)
 				if err := bgpServer.DelHost(ctx, vipCIDR, c.NodeName); err != nil {
@@ -352,11 +369,7 @@ func (cluster *Cluster) bgpHealthCheckLoop(ctx context.Context, c *kubevip.Confi
 
 		select {
 		case <-ctx.Done():
-			if routeAnnounced {
-				if err := bgpServer.DelHost(ctx, vipCIDR, c.NodeName); err != nil {
-					log.Error("BGP health check: failed to withdraw route", "cidr", vipCIDR, "err", err)
-				}
-			}
+			withdrawOnCancel()
 			return
 		case <-ticker.C:
 		}
@@ -399,7 +412,7 @@ func getNodeIPs(ctx context.Context, nodename string, client *kubernetes.Clients
 }
 
 // StartLoadBalancerService will start a VIP instance and leave it for kube-proxy to handle
-func (cluster *Cluster) StartLoadBalancerService(ctx context.Context, c *kubevip.Config, bgp *bgp.Server, name string, wg *sync.WaitGroup) error {
+func (cluster *Cluster) StartLoadBalancerService(ctx context.Context, c *kubevip.Config, bgp bgp.BGPManager, name string, wg *sync.WaitGroup) error {
 	// use a Go context so we can tell the arp loop code when we
 	// want to step down
 	//nolint
