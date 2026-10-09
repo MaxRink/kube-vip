@@ -40,8 +40,9 @@ type Processor struct {
 	// Keeps track of all running instances
 	ServiceInstances []*instance.Instance
 
-	mutex     sync.Mutex
-	bgpServer *bgp.Server
+	mutex          sync.Mutex
+	lifecycleMutex sync.Mutex
+	bgpServer      *bgp.Server
 
 	clientSet   *kubernetes.Clientset
 	rwClientSet *kubernetes.Clientset
@@ -159,11 +160,7 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 
 	// The modified event should only be triggered if the service has been modified (i.e. moved somewhere else)
 	if event.Type == watch.Modified {
-		shouldGarbageCollect := false
-		if svcInstance != nil {
-			shouldGarbageCollect = serviceChanged(svcInstance, svc)
-		}
-		if shouldGarbageCollect {
+		if changedSinceWatched(svcInstance, svcCtx, svc) {
 			for _, addr := range svcAddresses {
 				// log.Debugf("(svcs) Retrieving local addresses, to ensure that this modified address doesn't exist: %s", addr)
 				f, err := vip.GarbageCollect(p.config.Interface, addr, p.intfMgr)
@@ -213,7 +210,7 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 	}
 
 	if svcInstance == nil {
-		svcInstance, err = instance.NewInstance(ctx, svc, p.config, p.intfMgr, p.arpMgr, p.routeMgr, p.nodeLabelManager, wg)
+		svcInstance, err = instance.NewInstance(svcCtx.Ctx, svc, p.config, p.intfMgr, p.arpMgr, p.routeMgr, p.nodeLabelManager, wg)
 		if err != nil {
 			metrics.ServiceReconcileErrorsTotal.WithLabelValues(svc.Namespace, svc.Name, "new_instance").Inc()
 			return fmt.Errorf("unable to create instance for service %s/%s", svc.Namespace, svc.Name)
@@ -268,6 +265,7 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		})
 
 		// tag service as watched
+		svcCtx.SetWatchedService(svc)
 		svcCtx.SetWatched(true)
 	}
 
@@ -315,12 +313,20 @@ func (p *Processor) Delete(event watch.Event, forcedOnly bool) error {
 }
 
 func (p *Processor) deleteTrackedService(svc *v1.Service) error {
+	p.lifecycleMutex.Lock()
+	defer p.lifecycleMutex.Unlock()
+
 	svcCtx, err := p.getServiceContext(svc.UID)
 	if err != nil {
 		return fmt.Errorf("(svcs) unable to get context: %w", err)
 	}
 
 	if svcCtx != nil {
+		// Stop every producer before tearing down the tracked instance. Endpoint
+		// reconciliation uses lifecycleMutex too, so no queued event can restore
+		// datapath state after this point.
+		svcCtx.Cancel()
+
 		// If no leader election is enabled, delete routes here
 		if !p.config.EnableLeaderElection && !p.config.EnableServicesElection &&
 			p.config.EnableRoutingTable && svcCtx.HasConfiguredNetworks() {
@@ -329,18 +335,18 @@ func (p *Processor) deleteTrackedService(svc *v1.Service) error {
 			}
 		}
 
-		if !p.config.EnableServicesElection {
-			// If this is an active service then and additional leaderElection will handle stopping
-			err = p.deleteService(svcCtx.Ctx, svc.UID)
-			if err != nil {
-				log.Error(err.Error())
-			}
+		// Delete synchronously even with per-Service election. Waiting for the
+		// election callback leaves a window in which a queued callback can add the
+		// deleted Service again.
+		if err = p.deleteService(context.WithoutCancel(svcCtx.Ctx), svc.UID); err != nil {
+			log.Error(err.Error())
 		}
 
-		// Calls the cancel function of the context
 		log.Warn("(svcs) The load balancer was deleted, cancelling context", "namespace", svc.Namespace, "name", svc.Name, "uid", svc.UID)
-		svcCtx.Cancel()
-		p.svcMap.Delete(svc.UID)
+		ns, name := lease.ServiceName(svc)
+		leaseID := lease.NewID(p.config.LeaderElectionType, ns, name)
+		p.leaseMgr.Delete(leaseID, lease.ServiceNamespacedName(svc), nil)
+		p.svcMap.CompareAndDelete(svc.UID, svcCtx)
 		// Drop the per-service election series so a recreated service starts clean.
 		metrics.ServiceElectionLoops.DeleteLabelValues(svc.Namespace, svc.Name)
 		p.updateActiveServicesMetric()
@@ -349,6 +355,16 @@ func (p *Processor) deleteTrackedService(svc *v1.Service) error {
 	}
 
 	return nil
+}
+
+func (p *Processor) withActiveService(svcCtx *servicecontext.Context, reconcile func()) bool {
+	p.lifecycleMutex.Lock()
+	defer p.lifecycleMutex.Unlock()
+	if svcCtx.Ctx.Err() != nil {
+		return false
+	}
+	reconcile()
+	return true
 }
 
 func (p *Processor) Stop() {
@@ -396,23 +412,40 @@ func (p *Processor) dropCancelledServiceContext(uid types.UID, svcCtx *serviceco
 	return nil
 }
 
-func serviceChanged(i *instance.Instance, svc *v1.Service) bool {
+// changedSinceWatched reports whether svc differs from the Service this node is acting on.
+// The instance is removed when this node stops leading (or never becomes leader), but the
+// watchers keep running with the Service they were started with. Without an instance we
+// compare against that copy, otherwise e.g. a Cluster -> Local change is never picked up
+// and the node keeps entering elections without a local endpoint.
+func changedSinceWatched(i *instance.Instance, svcCtx *servicecontext.Context, svc *v1.Service) bool {
+	if i != nil {
+		return serviceChanged(i.ServiceSnapshot, svc)
+	}
+	if svcCtx != nil {
+		if watched := svcCtx.WatchedService(); watched != nil {
+			return serviceChanged(watched, svc)
+		}
+	}
+	return false
+}
+
+func serviceChanged(original, svc *v1.Service) bool {
 	svcAddresses, svcHostnames := instance.FetchServiceAddresses(svc)
-	originalServiceAddresses, originalServiceHostnames := instance.FetchServiceAddresses(i.ServiceSnapshot)
+	originalServiceAddresses, originalServiceHostnames := instance.FetchServiceAddresses(original)
 
 	// Service addresses changed
 	return !reflect.DeepEqual(originalServiceAddresses, svcAddresses) ||
 		// Service hostnames changed
 		!reflect.DeepEqual(originalServiceHostnames, svcHostnames) ||
 		// ExternalTrafficPolicy changed
-		svc.Spec.ExternalTrafficPolicy != i.ServiceSnapshot.Spec.ExternalTrafficPolicy ||
+		svc.Spec.ExternalTrafficPolicy != original.Spec.ExternalTrafficPolicy ||
 		// IP stack configuration changed
-		!reflect.DeepEqual(svc.Spec.IPFamilies, i.ServiceSnapshot.Spec.IPFamilies) ||
-		*svc.Spec.IPFamilyPolicy != *i.ServiceSnapshot.Spec.IPFamilyPolicy ||
+		!reflect.DeepEqual(svc.Spec.IPFamilies, original.Spec.IPFamilies) ||
+		*svc.Spec.IPFamilyPolicy != *original.Spec.IPFamilyPolicy ||
 		// DDNS was disabled/enabled
-		svc.Annotations[kubevip.ServiceDDNS] != i.ServiceSnapshot.Annotations[kubevip.ServiceDDNS] ||
+		svc.Annotations[kubevip.ServiceDDNS] != original.Annotations[kubevip.ServiceDDNS] ||
 		// lease name was changed
-		svc.Annotations[kubevip.ServiceLease] != i.ServiceSnapshot.Annotations[kubevip.ServiceLease]
+		svc.Annotations[kubevip.ServiceLease] != original.Annotations[kubevip.ServiceLease]
 }
 
 func (p *Processor) updateActiveServicesMetric() {
