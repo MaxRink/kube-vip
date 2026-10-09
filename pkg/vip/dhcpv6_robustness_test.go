@@ -2,8 +2,10 @@ package vip
 
 import (
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
 )
@@ -21,19 +23,101 @@ func TestDHCPv6StopReleasesManagerReferenceForParentInterface(t *testing.T) {
 	}
 
 	client := &DHCPv6Client{
-		iface:        &net.Interface{Name: "vlan-child"},
-		managerKey:   "parent0",
-		ipChan:       make(chan string),
-		stopChan:     make(chan struct{}),
-		releasedChan: make(chan struct{}),
-		ic:           shared,
+		iface:      &net.Interface{Name: "vlan-child"},
+		managerKey: "parent0",
+		ipChan:     make(chan string),
+		stopChan:   make(chan struct{}),
+		ic:         shared,
+		addr:       &dhcpv6.OptIAAddress{},
 	}
-	close(client.releasedChan)
 
 	client.Stop()
 
 	if got := references.Load(); got != 1 {
 		t.Fatalf("manager reference count = %d, want 1 after stopping one VLAN client", got)
+	}
+}
+
+func TestDHCPv6ClientManagerSharesOneClientPerParentInterface(t *testing.T) {
+	references := &atomic.Int32{}
+	references.Store(1)
+	shared := &DHCPv6InternalClient{references: references}
+	manager := &DHCPv6ClientManager{
+		clients: map[string]*DHCPv6InternalClient{"parent0": shared},
+	}
+
+	var wg sync.WaitGroup
+	for range 64 {
+		wg.Go(func() {
+			client, err := manager.Add("parent0")
+			if err != nil {
+				t.Errorf("Add() error = %v", err)
+				return
+			}
+			if client != shared {
+				t.Errorf("Add() client = %p, want the shared client %p", client, shared)
+			}
+			manager.Delete("parent0")
+		})
+	}
+	wg.Wait()
+
+	if got := manager.Get("parent0"); got != shared {
+		t.Fatalf("shared client = %v, want it retained while still referenced", got)
+	}
+	if got := references.Load(); got != 1 {
+		t.Fatalf("manager reference count = %d, want 1", got)
+	}
+}
+
+func TestDHCPRetryTimersAreRescheduledAfterFailure(t *testing.T) {
+	t1, t2 := time.NewTimer(time.Hour), time.NewTimer(time.Hour)
+	t1.Stop()
+	t2.Stop()
+	resetLeaseTimers(t1, t2, 10*time.Millisecond, 20*time.Millisecond)
+	select {
+	case <-t1.C:
+	case <-time.After(time.Second):
+		t.Fatal("renew timer was not rescheduled")
+	}
+	select {
+	case <-t2.C:
+	case <-time.After(time.Second):
+		t.Fatal("rebind timer was not rescheduled")
+	}
+}
+
+func TestDHCPStopWaitsForReleaseCompletion(t *testing.T) {
+	v4 := NewDHCPv4Client(nil, false, "", 0, false)
+	close(v4.started)
+	v4Done := make(chan struct{})
+	go func() { v4.Stop(); close(v4Done) }()
+	select {
+	case <-v4Done:
+		t.Fatal("DHCPv4 Stop returned before release completion")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(v4.done)
+	select {
+	case <-v4Done:
+	case <-time.After(time.Second):
+		t.Fatal("DHCPv4 Stop did not finish after release completion")
+	}
+
+	v6 := &DHCPv6Client{stopChan: make(chan struct{}), started: make(chan struct{}), done: make(chan struct{}), managerKey: "missing"}
+	close(v6.started)
+	v6Done := make(chan struct{})
+	go func() { v6.Stop(); close(v6Done) }()
+	select {
+	case <-v6Done:
+		t.Fatal("DHCPv6 Stop returned before release completion")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(v6.done)
+	select {
+	case <-v6Done:
+	case <-time.After(time.Second):
+		t.Fatal("DHCPv6 Stop did not finish after release completion")
 	}
 }
 
