@@ -8,12 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Use host scope for local routing-table routes so Linux accepts IPv4 `RTN_LOCAL` routes without assigning the VIP to an interface.
+- Make `manager` and `service` runtime configuration presence-aware, with explicit CLI flags taking precedence over environment variables, configuration files, and defaults. Strict YAML/JSON loading now preserves explicit false, zero, and empty values and normalizes standalone BGP peer configuration for runtime use.
 - Propagate `bgp_attach_ip_to_interface` into per-service config so it attaches BGP-mode Service VIPs to the interface as configured.
 - Add a configurable kube-vip instance name and use it to isolate internal nftables egress tables, persist table ownership on Services, and migrate per-Service chains without affecting other deployments. Fixes #1634.
 - Retry on 403 Forbidden and 401 Unauthorized in `ServicesWatcher` at startup with exponential backoff. Fixes #1464.
 - Reintroduce BGP config via node annotations. Fixes #1488.
 - Fail fast in runtime `manager` and `service` paths when legacy `vip_address` is used without `vip_subnet` in control-plane ARP, BGP, or Routing Table mode.
 - Cancel the mode context on init or configuration failure before waiting on goroutines during shutdown.
+- Join dual-stack Service addresses with `_` instead of `,` in the `service-provided.kube-vip.io` node label so the label value is valid and node labeling no longer causes Service lease churn. Fixes #1793.
 
 
 ### Added
