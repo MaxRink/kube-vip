@@ -104,7 +104,15 @@ func (p *Processor) startServicesLeaderElection(svcCtx *servicecontext.Context, 
 	// healthy and a new election should have started immediately.
 	go func() {
 		<-svcCtx.Ctx.Done()
-		p.leaseMgr.Delete(id, objectName, svcLease)
+		// A replacement election may reuse the same lease object name. Fence
+		// this deferred cleanup by the exact service context while holding the
+		// per-service lock, so an old watcher cannot retire the replacement.
+		unlockService := p.lockService(service.UID)
+		defer unlockService()
+		current, err := p.getServiceContext(service.UID)
+		if err == nil && current == svcCtx {
+			p.leaseMgr.Delete(id, objectName, svcLease)
+		}
 	}()
 
 	select {

@@ -163,7 +163,12 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 	}
 
 	unlockService := p.lockService(svc.UID)
-	defer unlockService()
+	locked := true
+	defer func() {
+		if locked {
+			unlockService()
+		}
+	}()
 
 	svcInstance := instance.FindServiceInstance(svc, p.ServiceInstances)
 
@@ -185,26 +190,49 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		oldWatchedService = svcCtx.WatchedService()
 	}
 	svcCtx = p.dropCancelledServiceContext(svc.UID, svcCtx)
+	waitForOldCtx := oldCtx != nil && oldCtx != svcCtx
 	if svcCtx == nil {
 		// A cancelled watcher cannot be paired with its old instance after a
 		// leadership handoff; force construction of a fresh instance below.
 		if svcInstance != nil {
-			if oldCtx != nil {
-				if err := oldCtx.WaitForWatchingStopped(context.Background()); err != nil {
-					return fmt.Errorf("wait for cancelled service watcher: %w", err)
-				}
-			}
 			if err := p.deleteService(context.Background(), svc.UID); err != nil {
+				unlockService()
+				locked = false
 				return fmt.Errorf("failed to retire cancelled service instance: %w", err)
-			}
-			if oldWatchedService != nil {
-				ns, name := lease.ServiceName(oldWatchedService)
-				p.leaseMgr.Delete(lease.NewID(p.config.LeaderElectionType, ns, name), lease.ServiceNamespacedName(oldWatchedService), nil)
 			}
 		}
 		svcInstance = nil
 	}
-
+	if waitForOldCtx {
+		// Waiting for watcher shutdown must not hold the UID lock: the old
+		// election callback takes the same lock before it can signal completion.
+		unlockService()
+		locked = false
+		if err := oldCtx.WaitForWatchingStopped(context.Background()); err != nil {
+			return fmt.Errorf("wait for cancelled service watcher: %w", err)
+		}
+		unlockService = p.lockService(svc.UID)
+		locked = true
+		current, err := p.getServiceContext(svc.UID)
+		if err != nil {
+			unlockService()
+			locked = false
+			return fmt.Errorf("get replacement service context: %w", err)
+		}
+		// Only remove the old lease membership if no replacement won the
+		// handoff. A replacement may legitimately reuse the same object name.
+		if current == nil || current == oldCtx {
+			if oldWatchedService != nil {
+				ns, name := lease.ServiceName(oldWatchedService)
+				p.leaseMgr.Delete(lease.NewID(p.config.LeaderElectionType, ns, name), lease.ServiceNamespacedName(oldWatchedService), nil)
+			}
+		} else {
+			// Another reconciliation completed the handoff while this event was
+			// waiting. It owns the replacement instance and watcher; do not create
+			// a second context or instance for the same UID here.
+			return nil
+		}
+	}
 	// The modified event should only be triggered if the service has been modified (i.e. moved somewhere else)
 	if event.Type == watch.Modified {
 		shouldGarbageCollect := false
