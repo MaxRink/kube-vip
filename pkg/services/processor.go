@@ -722,6 +722,8 @@ func serviceChanged(i *instance.Instance, svc *v1.Service) bool {
 		*svc.Spec.IPFamilyPolicy != *i.ServiceSnapshot.Spec.IPFamilyPolicy ||
 		// DDNS was disabled/enabled
 		svc.Annotations[kubevip.ServiceDDNS] != i.ServiceSnapshot.Annotations[kubevip.ServiceDDNS] ||
+		// per-Service election mode was enabled/disabled
+		svc.Annotations[kubevip.ForcePerServiceElection] != i.ServiceSnapshot.Annotations[kubevip.ForcePerServiceElection] ||
 		// lease name was changed
 		svc.Annotations[kubevip.ServiceLease] != i.ServiceSnapshot.Annotations[kubevip.ServiceLease]
 }

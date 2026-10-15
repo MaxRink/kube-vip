@@ -102,6 +102,7 @@ EventLoop:
 		select {
 		case <-ctx.Done():
 			log.Info("global context done")
+			break EventLoop
 		case <-watcherCtx.Done():
 			log.Info("WatcheConotext done")
 			break EventLoop

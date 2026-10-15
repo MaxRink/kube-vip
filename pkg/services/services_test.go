@@ -52,6 +52,19 @@ func TestSyncServicesOnDemandWinnerProgramsForcedService(t *testing.T) {
 	}
 }
 
+func TestServiceChangedDetectsPerServiceElectionToggle(t *testing.T) {
+	old := &v1.Service{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "default", Name: "forced", UID: "forced",
+		Annotations: map[string]string{kubevip.ForcePerServiceElection: "false"},
+	}, Spec: v1.ServiceSpec{LoadBalancerIP: "192.0.2.10"}}
+	current := old.DeepCopy()
+	current.Annotations[kubevip.ForcePerServiceElection] = "true"
+
+	if !serviceChanged(&instance.Instance{ServiceSnapshot: old}, current) {
+		t.Fatal("serviceChanged did not detect ForcePerServiceElection transition")
+	}
+}
+
 func TestConfigureServiceDoesNotOverwriteActiveEndpoint(t *testing.T) {
 	const selectedEndpoint = "172.30.2.40"
 
