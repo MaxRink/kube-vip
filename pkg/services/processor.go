@@ -39,10 +39,15 @@ import (
 
 const concurrentServiceLocks = 128
 
+type serviceDrain struct {
+	done chan struct{}
+}
+
 type Processor struct {
 	config        *kubevip.Config
 	lbClassFilter func(svc *v1.Service, config *kubevip.Config) bool
 	svcMap        sync.Map
+	draining      sync.Map
 	servicesMu    sync.Mutex
 	services      map[types.NamespacedName]types.UID
 	recoveryMu    sync.Mutex
@@ -169,6 +174,14 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 			unlockService()
 		}
 	}()
+	if value, ok := p.draining.Load(svc.UID); ok {
+		drain := value.(*serviceDrain)
+		unlockService()
+		locked = false
+		<-drain.done
+		unlockService = p.lockService(svc.UID)
+		locked = true
+	}
 
 	svcInstance := instance.FindServiceInstance(svc, p.ServiceInstances)
 
@@ -191,6 +204,7 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 	}
 	svcCtx = p.dropCancelledServiceContext(svc.UID, svcCtx)
 	waitForOldCtx := oldCtx != nil && oldCtx != svcCtx
+	var drain *serviceDrain
 	if svcCtx == nil {
 		// A cancelled watcher cannot be paired with its old instance after a
 		// leadership handoff; force construction of a fresh instance below.
@@ -204,11 +218,15 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		svcInstance = nil
 	}
 	if waitForOldCtx {
+		drain = &serviceDrain{done: make(chan struct{})}
+		p.draining.Store(svc.UID, drain)
 		// Waiting for watcher shutdown must not hold the UID lock: the old
 		// election callback takes the same lock before it can signal completion.
 		unlockService()
 		locked = false
 		if err := oldCtx.WaitForWatchingStopped(context.Background()); err != nil {
+			close(drain.done)
+			p.draining.Delete(svc.UID)
 			return fmt.Errorf("wait for cancelled service watcher: %w", err)
 		}
 		unlockService = p.lockService(svc.UID)
@@ -230,8 +248,12 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 			// Another reconciliation completed the handoff while this event was
 			// waiting. It owns the replacement instance and watcher; do not create
 			// a second context or instance for the same UID here.
+			close(drain.done)
+			p.draining.Delete(svc.UID)
 			return nil
 		}
+		close(drain.done)
+		p.draining.Delete(svc.UID)
 	}
 	// The modified event should only be triggered if the service has been modified (i.e. moved somewhere else)
 	if event.Type == watch.Modified {
@@ -252,6 +274,8 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 			if svcCtx != nil {
 				log.Warn("(svcs) The load balancer has changed, cancelling original load balancer")
 				oldCtx := svcCtx
+				drain := &serviceDrain{done: make(chan struct{})}
+				p.draining.Store(svc.UID, drain)
 				oldWatchedService := oldCtx.WatchedService()
 				// Set it to inactive before draining its watcher outside the UID lock.
 				oldCtx.Cancel()
@@ -271,6 +295,8 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 				unlockService()
 				locked = false
 				if err := oldCtx.WaitForWatchingStopped(context.Background()); err != nil {
+					close(drain.done)
+					p.draining.Delete(svc.UID)
 					return fmt.Errorf("wait for replaced service watcher: %w", err)
 				}
 				unlockService = p.lockService(svc.UID)
@@ -280,8 +306,12 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 					return fmt.Errorf("get replacement service context: %w", err)
 				}
 				if current != nil {
+					close(drain.done)
+					p.draining.Delete(svc.UID)
 					return nil
 				}
+				close(drain.done)
+				p.draining.Delete(svc.UID)
 				// The next section creates a fresh context.
 				svcCtx = nil
 				svcInstance = nil
