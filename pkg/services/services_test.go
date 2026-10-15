@@ -53,10 +53,11 @@ func TestSyncServicesOnDemandWinnerProgramsForcedService(t *testing.T) {
 }
 
 func TestServiceChangedDetectsPerServiceElectionToggle(t *testing.T) {
+	policy := v1.IPFamilyPolicySingleStack
 	old := &v1.Service{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "default", Name: "forced", UID: "forced",
 		Annotations: map[string]string{kubevip.ForcePerServiceElection: "false"},
-	}, Spec: v1.ServiceSpec{LoadBalancerIP: "192.0.2.10"}}
+	}, Spec: v1.ServiceSpec{LoadBalancerIP: "192.0.2.10", IPFamilyPolicy: &policy}}
 	current := old.DeepCopy()
 	current.Annotations[kubevip.ForcePerServiceElection] = "true"
 
