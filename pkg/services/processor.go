@@ -120,10 +120,7 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		// that old per-Service context before ignoring the now-global Service. A
 		// forced watcher also observes ordinary Services, so only tear down when
 		// the tracked snapshot proves this UID was previously forced.
-		if !p.wasForcedService(svc.UID) {
-			return nil
-		}
-		return p.deleteTrackedService(svc)
+		return p.retireForcedService(svc)
 	}
 	if !forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] == "true" {
 		return nil
@@ -249,6 +246,7 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 	p.trackService(svc)
 
 	// this goroutine starts service handling function (with or without leaderelection)
+	svcCtx.SetWatchedService(svc)
 	if svcCtx.StartWatching() {
 		wg.Go(func() {
 			watchWg := sync.WaitGroup{}
@@ -301,21 +299,47 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 	return nil
 }
 
-func (p *Processor) wasForcedService(uid types.UID) bool {
-	for _, inst := range p.ServiceInstances {
-		if inst != nil && inst.ServiceUID == uid && inst.ServiceSnapshot != nil &&
-			inst.ServiceSnapshot.Annotations[kubevip.ForcePerServiceElection] == "true" {
-			return true
+func (p *Processor) retireForcedService(svc *v1.Service) error {
+	unlock := p.lockService(svc.UID)
+	svcCtx, err := p.getServiceContext(svc.UID)
+	if err != nil || svcCtx == nil {
+		unlock()
+		return err
+	}
+	watched := svcCtx.WatchedService()
+	if watched == nil || watched.Annotations[kubevip.ForcePerServiceElection] != "true" {
+		unlock()
+		return nil
+	}
+	svcCtx.Cancel()
+	svcCtx.CallLeaderCancel()
+	unlock()
+	if err := svcCtx.WaitForWatchingStopped(context.Background()); err != nil {
+		return fmt.Errorf("wait for service watcher: %w", err)
+	}
+
+	// Re-acquire the per-Service lock and only clean up if this exact context is
+	// still current. A normal watcher may have replaced it during the wait.
+	unlock = p.lockService(svc.UID)
+	defer unlock()
+	current, err := p.getServiceContext(svc.UID)
+	if err != nil || current != svcCtx {
+		return err
+	}
+	if !p.config.EnableLeaderElection && !p.config.EnableServicesElection &&
+		p.config.EnableRoutingTable && svcCtx.HasConfiguredNetworks() {
+		if errs := endpoints.ClearRoutes(svc, &p.ServiceInstances, p.routeMgr); len(errs) == 0 {
+			svcCtx.ConfiguredNetworks.Clear()
 		}
 	}
-	if value, ok := p.svcMap.Load(uid); ok {
-		if svcCtx, ok := value.(*servicecontext.Context); ok {
-			if watched := svcCtx.WatchedService(); watched != nil && watched.Annotations[kubevip.ForcePerServiceElection] == "true" {
-				return true
-			}
-		}
+	if err := p.deleteService(context.WithoutCancel(svcCtx.Ctx), svc.UID); err != nil {
+		log.Error(err.Error())
 	}
-	return false
+	ns, name := lease.ServiceName(svc)
+	p.leaseMgr.Delete(lease.NewID(p.config.LeaderElectionType, ns, name), lease.ServiceNamespacedName(svc), nil)
+	p.svcMap.CompareAndDelete(svc.UID, svcCtx)
+	p.untrackService(svc)
+	return nil
 }
 
 func (p *Processor) waitForAddress(ctx context.Context, svc *v1.Service) (*v1.Service, error) {
