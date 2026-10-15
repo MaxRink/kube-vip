@@ -719,6 +719,9 @@ func (p *Processor) Delete(event watch.Event, forcedOnly bool) error {
 }
 
 func (p *Processor) deleteTrackedService(svc *v1.Service) error {
+	if value, ok := p.draining.Load(svc.UID); ok {
+		<-value.(*serviceDrain).done
+	}
 	var svcCtx *servicecontext.Context
 	for {
 		var err error
