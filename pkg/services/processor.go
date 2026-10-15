@@ -117,7 +117,12 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 
 	if forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] != "true" {
 		// A forced watcher may own a Service whose annotation was removed. Retire
-		// that old per-Service context before ignoring the now-global Service.
+		// that old per-Service context before ignoring the now-global Service. A
+		// forced watcher also observes ordinary Services, so only tear down when
+		// the tracked snapshot proves this UID was previously forced.
+		if !p.wasForcedService(svc.UID) {
+			return nil
+		}
 		return p.deleteTrackedService(svc)
 	}
 	if !forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] == "true" {
@@ -294,6 +299,23 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 	}
 
 	return nil
+}
+
+func (p *Processor) wasForcedService(uid types.UID) bool {
+	for _, inst := range p.ServiceInstances {
+		if inst != nil && inst.ServiceUID == uid && inst.ServiceSnapshot != nil &&
+			inst.ServiceSnapshot.Annotations[kubevip.ForcePerServiceElection] == "true" {
+			return true
+		}
+	}
+	if value, ok := p.svcMap.Load(uid); ok {
+		if svcCtx, ok := value.(*servicecontext.Context); ok {
+			if watched := svcCtx.WatchedService(); watched != nil && watched.Annotations[kubevip.ForcePerServiceElection] == "true" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *Processor) waitForAddress(ctx context.Context, svc *v1.Service) (*v1.Service, error) {
