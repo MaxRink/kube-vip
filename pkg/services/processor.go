@@ -180,13 +180,16 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		return fmt.Errorf("failed to get service context: %w", err)
 	}
 	svcCtx = p.dropCancelledServiceContext(svc.UID, svcCtx)
+	if svcCtx == nil {
+		// A cancelled watcher cannot be paired with its old instance after a
+		// leadership handoff; force construction of a fresh instance below.
+		svcInstance = nil
+	}
 
 	// The modified event should only be triggered if the service has been modified (i.e. moved somewhere else)
 	if event.Type == watch.Modified {
 		shouldGarbageCollect := false
-		if svcInstance != nil {
-			shouldGarbageCollect = serviceChanged(svcInstance, svc)
-		}
+		shouldGarbageCollect = changedSinceWatched(svcInstance, svcCtx, svc)
 		if shouldGarbageCollect {
 			for _, addr := range svcAddresses {
 				// log.Debugf("(svcs) Retrieving local addresses, to ensure that this modified address doesn't exist: %s", addr)
@@ -757,25 +760,38 @@ func (p *Processor) dropCancelledServiceContext(uid types.UID, svcCtx *serviceco
 	return nil
 }
 
-func serviceChanged(i *instance.Instance, svc *v1.Service) bool {
+func changedSinceWatched(i *instance.Instance, svcCtx *servicecontext.Context, svc *v1.Service) bool {
+	if i != nil {
+		return serviceChanged(i.ServiceSnapshot, svc)
+	}
+	if svcCtx != nil {
+		if watched := svcCtx.WatchedService(); watched != nil {
+			return serviceChanged(watched, svc)
+		}
+	}
+	return false
+}
+
+func serviceChanged(original, svc *v1.Service) bool {
 	svcAddresses, svcHostnames := instance.FetchServiceAddresses(svc)
-	originalServiceAddresses, originalServiceHostnames := instance.FetchServiceAddresses(i.ServiceSnapshot)
+	originalServiceAddresses, originalServiceHostnames := instance.FetchServiceAddresses(original)
 
 	// Service addresses changed
 	return !reflect.DeepEqual(originalServiceAddresses, svcAddresses) ||
 		// Service hostnames changed
 		!reflect.DeepEqual(originalServiceHostnames, svcHostnames) ||
 		// ExternalTrafficPolicy changed
-		svc.Spec.ExternalTrafficPolicy != i.ServiceSnapshot.Spec.ExternalTrafficPolicy ||
+		svc.Spec.ExternalTrafficPolicy != original.Spec.ExternalTrafficPolicy ||
 		// IP stack configuration changed
 		!reflect.DeepEqual(svc.Spec.IPFamilies, i.ServiceSnapshot.Spec.IPFamilies) ||
-		*svc.Spec.IPFamilyPolicy != *i.ServiceSnapshot.Spec.IPFamilyPolicy ||
+		(svc.Spec.IPFamilyPolicy == nil) != (original.Spec.IPFamilyPolicy == nil) ||
+		(svc.Spec.IPFamilyPolicy != nil && original.Spec.IPFamilyPolicy != nil && *svc.Spec.IPFamilyPolicy != *original.Spec.IPFamilyPolicy) ||
 		// DDNS was disabled/enabled
-		svc.Annotations[kubevip.ServiceDDNS] != i.ServiceSnapshot.Annotations[kubevip.ServiceDDNS] ||
+		svc.Annotations[kubevip.ServiceDDNS] != original.Annotations[kubevip.ServiceDDNS] ||
 		// per-Service election mode was enabled/disabled
-		svc.Annotations[kubevip.ForcePerServiceElection] != i.ServiceSnapshot.Annotations[kubevip.ForcePerServiceElection] ||
+		svc.Annotations[kubevip.ForcePerServiceElection] != original.Annotations[kubevip.ForcePerServiceElection] ||
 		// lease name was changed
-		svc.Annotations[kubevip.ServiceLease] != i.ServiceSnapshot.Annotations[kubevip.ServiceLease]
+		svc.Annotations[kubevip.ServiceLease] != original.Annotations[kubevip.ServiceLease]
 }
 
 func (p *Processor) trackService(svc *v1.Service) {

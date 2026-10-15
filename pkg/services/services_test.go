@@ -61,7 +61,7 @@ func TestServiceChangedDetectsPerServiceElectionToggle(t *testing.T) {
 	current := old.DeepCopy()
 	current.Annotations[kubevip.ForcePerServiceElection] = "true"
 
-	if !serviceChanged(&instance.Instance{ServiceSnapshot: old}, current) {
+	if !serviceChanged(old, current) {
 		t.Fatal("serviceChanged did not detect ForcePerServiceElection transition")
 	}
 }
