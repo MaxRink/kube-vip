@@ -175,7 +175,6 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 			unlockService()
 		}
 	}()
-	waitedForDrain := false
 	for {
 		value, ok := p.draining.Load(svc.UID)
 		if !ok {
@@ -185,30 +184,27 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		unlockService()
 		locked = false
 		<-drain.done
-		waitedForDrain = true
 		unlockService = p.lockService(svc.UID)
 		locked = true
 	}
-	if waitedForDrain {
-		current, err := p.getServiceContext(svc.UID)
-		if err != nil {
-			unlockService()
-			locked = false
-			return fmt.Errorf("get current service context after drain: %w", err)
-		}
-		if current != nil {
-			if watched := current.WatchedService(); serviceSnapshotNewer(watched, svc) {
-				svc = watched
-				if forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] != "true" {
-					unlockService()
-					locked = false
-					return p.retireForcedService(svc)
-				}
-				if !forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] == "true" {
-					unlockService()
-					locked = false
-					return nil
-				}
+	current, err := p.getServiceContext(svc.UID)
+	if err != nil {
+		unlockService()
+		locked = false
+		return fmt.Errorf("get current service context: %w", err)
+	}
+	if current != nil {
+		if watched := current.WatchedService(); serviceSnapshotNewer(watched, svc) {
+			svc = watched
+			if forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] != "true" {
+				unlockService()
+				locked = false
+				return p.retireForcedService(svc)
+			}
+			if !forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] == "true" {
+				unlockService()
+				locked = false
+				return nil
 			}
 		}
 	}
