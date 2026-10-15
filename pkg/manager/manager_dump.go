@@ -129,8 +129,6 @@ func (sm *Manager) dumpServicesSection(ctx context.Context) {
 				fmt.Println("Unable to retrieve all Services")
 			} else {
 				for x := range svcList.Items {
-
-					// Build all addresses
 					vipConfigs := ""
 					for j, cfg := range svcList.Items[x].Status.LoadBalancer.Ingress {
 						if j > 0 {
