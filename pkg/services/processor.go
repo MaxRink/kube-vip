@@ -397,6 +397,9 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 }
 
 func (p *Processor) retireForcedService(svc *v1.Service) error {
+	if value, ok := p.draining.Load(svc.UID); ok {
+		<-value.(*serviceDrain).done
+	}
 	unlock := p.lockService(svc.UID)
 	svcCtx, err := p.getServiceContext(svc.UID)
 	if err != nil || svcCtx == nil {
