@@ -204,6 +204,7 @@ func TestForcedWatcherRetiresServiceWhenElectionAnnotationIsRemoved(t *testing.T
 		ServiceInstances: []*instance.Instance{{ServiceUID: uid, ServiceSnapshot: previous}},
 	}
 	svcCtx := servicecontext.New(context.Background())
+	svcCtx.SetWatchedService(previous)
 	p.svcMap.Store(uid, svcCtx)
 
 	if err := p.AddOrModify(context.Background(), watch.Event{Type: watch.Modified, Object: modified}, nil, true, nil, nil); err != nil {
@@ -228,6 +229,7 @@ func TestForcedWatcherDoesNotRetireOrdinaryService(t *testing.T) {
 		ServiceInstances: []*instance.Instance{{ServiceUID: uid, ServiceSnapshot: service}},
 	}
 	svcCtx := servicecontext.New(context.Background())
+	svcCtx.SetWatchedService(service)
 	p.svcMap.Store(uid, svcCtx)
 
 	if err := p.AddOrModify(context.Background(), watch.Event{Type: watch.Modified, Object: service}, nil, true, nil, nil); err != nil {
