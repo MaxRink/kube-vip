@@ -231,11 +231,21 @@ func (c *Common) runGlobalElection(ctx context.Context, a election.Actions, leas
 
 	wg := sync.WaitGroup{}
 	defer wg.Wait()
+	var electionVIPs []string
+	servicesNamespace, servicesLeaseName := lease.NamespaceName(config.ServicesLeaseName, config)
+	if config.EnableServices && ns == servicesNamespace && leaseName == servicesLeaseName {
+		var err error
+		electionVIPs, err = c.svcProcessor.ElectionVIPs(ctx)
+		if err != nil {
+			log.Warn("unable to list Service VIPs for lease ownership", "err", err)
+		}
+	}
 
 	run := &election.RunConfig{
 		Config:           config,
 		LeaseID:          leaseID,
 		LeaseAnnotations: map[string]string{},
+		VIPs:             electionVIPs,
 		Mgr:              electionManager,
 		OnStartedLeading: func(ctx context.Context) {
 			wg.Go(func() {

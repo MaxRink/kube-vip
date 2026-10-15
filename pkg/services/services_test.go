@@ -16,7 +16,55 @@ import (
 
 	"github.com/kube-vip/kube-vip/pkg/instance"
 	"github.com/kube-vip/kube-vip/pkg/kubevip"
+	"github.com/kube-vip/kube-vip/pkg/node/noop"
+	"github.com/kube-vip/kube-vip/pkg/servicecontext"
 )
+
+func TestSyncServicesOnDemandWinnerProgramsForcedService(t *testing.T) {
+	service := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "forced", Namespace: "default", UID: "forced",
+			Annotations: map[string]string{kubevip.ForcePerServiceElection: "true"},
+		},
+		Spec: v1.ServiceSpec{LoadBalancerIP: "192.0.2.10"},
+	}
+	serviceInstance := &instance.Instance{ServiceSnapshot: service}
+	processor := &Processor{
+		config: &kubevip.Config{
+			DisableServiceUpdates:      true,
+			EnableARP:                  true,
+			PerServiceElectionOnDemand: true,
+		},
+		ServiceInstances: []*instance.Instance{serviceInstance},
+		nodeLabelManager: noop.NewManager(),
+	}
+	svcCtx := servicecontext.New(context.Background())
+	processor.svcMap.Store(service.UID, svcCtx)
+
+	if serviceInstance.AddCalled {
+		t.Fatal("forced service was programmed before election winner sync")
+	}
+	if err := processor.SyncServices(svcCtx, service, &sync.WaitGroup{}, true); err != nil {
+		t.Fatalf("SyncServices() error = %v", err)
+	}
+	if !serviceInstance.AddCalled {
+		t.Fatal("election winner did not program forced service")
+	}
+}
+
+func TestServiceChangedDetectsPerServiceElectionToggle(t *testing.T) {
+	policy := v1.IPFamilyPolicySingleStack
+	old := &v1.Service{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "default", Name: "forced", UID: "forced",
+		Annotations: map[string]string{kubevip.ForcePerServiceElection: "false"},
+	}, Spec: v1.ServiceSpec{LoadBalancerIP: "192.0.2.10", IPFamilyPolicy: &policy}}
+	current := old.DeepCopy()
+	current.Annotations[kubevip.ForcePerServiceElection] = "true"
+
+	if !serviceChanged(old, current) {
+		t.Fatal("serviceChanged did not detect ForcePerServiceElection transition")
+	}
+}
 
 func TestConfigureServiceDoesNotOverwriteActiveEndpoint(t *testing.T) {
 	const selectedEndpoint = "172.30.2.40"
