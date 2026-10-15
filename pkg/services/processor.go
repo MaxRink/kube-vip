@@ -246,11 +246,10 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 			}
 		} else {
 			// Another reconciliation completed the handoff while this event was
-			// waiting. It owns the replacement instance and watcher; do not create
-			// a second context or instance for the same UID here.
-			close(drain.done)
-			p.draining.Delete(svc.UID)
-			return nil
+			// waiting. Continue against its current context so a newer snapshot
+			// from the other watcher cannot be lost.
+			svcCtx = current
+			svcInstance = instance.FindServiceInstance(svc, p.ServiceInstances)
 		}
 		close(drain.done)
 		p.draining.Delete(svc.UID)
@@ -306,9 +305,13 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 					return fmt.Errorf("get replacement service context: %w", err)
 				}
 				if current != nil {
+					// A concurrent reconciliation installed a replacement while this
+					// event was draining the old generation. Reconcile this event
+					// against that context instead of dropping its newer snapshot.
+					svcCtx = current
+					svcInstance = instance.FindServiceInstance(svc, p.ServiceInstances)
 					close(drain.done)
 					p.draining.Delete(svc.UID)
-					return nil
 				}
 				close(drain.done)
 				p.draining.Delete(svc.UID)
