@@ -179,13 +179,27 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		metrics.ServiceReconcileErrorsTotal.WithLabelValues(svc.Namespace, svc.Name, "service_context").Inc()
 		return fmt.Errorf("failed to get service context: %w", err)
 	}
+	oldCtx := svcCtx
+	oldWatchedService := (*v1.Service)(nil)
+	if svcCtx != nil {
+		oldWatchedService = svcCtx.WatchedService()
+	}
 	svcCtx = p.dropCancelledServiceContext(svc.UID, svcCtx)
 	if svcCtx == nil {
 		// A cancelled watcher cannot be paired with its old instance after a
 		// leadership handoff; force construction of a fresh instance below.
 		if svcInstance != nil {
+			if oldCtx != nil {
+				if err := oldCtx.WaitForWatchingStopped(context.Background()); err != nil {
+					return fmt.Errorf("wait for cancelled service watcher: %w", err)
+				}
+			}
 			if err := p.deleteService(context.Background(), svc.UID); err != nil {
 				return fmt.Errorf("failed to retire cancelled service instance: %w", err)
+			}
+			if oldWatchedService != nil {
+				ns, name := lease.ServiceName(oldWatchedService)
+				p.leaseMgr.Delete(lease.NewID(p.config.LeaderElectionType, ns, name), lease.ServiceNamespacedName(oldWatchedService), nil)
 			}
 		}
 		svcInstance = nil
