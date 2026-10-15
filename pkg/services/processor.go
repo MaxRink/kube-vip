@@ -174,7 +174,11 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 			unlockService()
 		}
 	}()
-	if value, ok := p.draining.Load(svc.UID); ok {
+	for {
+		value, ok := p.draining.Load(svc.UID)
+		if !ok {
+			break
+		}
 		drain := value.(*serviceDrain)
 		unlockService()
 		locked = false
@@ -182,7 +186,6 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		unlockService = p.lockService(svc.UID)
 		locked = true
 	}
-
 	svcInstance := instance.FindServiceInstance(svc, p.ServiceInstances)
 
 	_, usesCommonLease := svc.Annotations[kubevip.ServiceLease]
@@ -233,6 +236,8 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		locked = true
 		current, err := p.getServiceContext(svc.UID)
 		if err != nil {
+			close(drain.done)
+			p.draining.Delete(svc.UID)
 			unlockService()
 			locked = false
 			return fmt.Errorf("get replacement service context: %w", err)
@@ -310,14 +315,13 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 					// against that context instead of dropping its newer snapshot.
 					svcCtx = current
 					svcInstance = instance.FindServiceInstance(svc, p.ServiceInstances)
-					close(drain.done)
-					p.draining.Delete(svc.UID)
+				} else {
+					// The next section creates a fresh context.
+					svcCtx = nil
+					svcInstance = nil
 				}
 				close(drain.done)
 				p.draining.Delete(svc.UID)
-				// The next section creates a fresh context.
-				svcCtx = nil
-				svcInstance = nil
 			}
 		}
 	}
