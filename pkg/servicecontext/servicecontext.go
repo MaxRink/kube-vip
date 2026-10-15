@@ -21,9 +21,8 @@ type Context struct {
 	LeaderCancel       context.CancelFunc
 	// watchedService is the Service the service and endpoint watchers were started with.
 	// They keep using it, even after the instance is removed from the manager.
-	watchedService   *v1.Service
-	watchingStopped  chan struct{}
-	watchingStopOnce sync.Once
+	watchedService  *v1.Service
+	watchingStopped chan struct{}
 }
 
 func New(ctx context.Context) *Context {
@@ -107,9 +106,27 @@ func (ctx *Context) CallLeaderCancel() {
 func (ctx *Context) SetWatched(watched bool) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
-
+	if watched && !ctx.IsWatched {
+		ctx.watchingStopped = make(chan struct{})
+	}
+	if !watched && ctx.IsWatched {
+		close(ctx.watchingStopped)
+	}
 	ctx.IsWatched = watched
 }
+
+func (ctx *Context) StartWatching() bool {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	if ctx.Ctx.Err() != nil || ctx.IsWatched {
+		return false
+	}
+	ctx.IsWatched = true
+	ctx.watchingStopped = make(chan struct{})
+	return true
+}
+
+func (ctx *Context) StopWatching() { ctx.SetWatched(false) }
 
 func (ctx *Context) IsWatchedLocked() bool {
 	ctx.mu.Lock()
