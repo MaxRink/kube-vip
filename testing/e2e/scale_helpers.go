@@ -5,6 +5,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -607,24 +608,26 @@ func SnapshotScaleMetrics(ctx context.Context, clusterName string, nodes []strin
 	return snapshot, nil
 }
 
-func ScaleCounterDelta(before, after ScaleMetricSnapshot, name string, labelsForMetric map[string]string) (float64, bool) {
+func ScaleCounterDelta(before, after ScaleMetricSnapshot, name string, labelsForMetric map[string]string) (float64, error) {
 	var total float64
-	found := false
 	for node, afterMetrics := range after {
 		beforeMetrics := before[node]
-		if len(matchingMetricValues(beforeMetrics, name, labelsForMetric)) == 0 || len(matchingMetricValues(afterMetrics, name, labelsForMetric)) == 0 {
+		beforeValues := matchingMetricValues(beforeMetrics, name, labelsForMetric)
+		afterValues := matchingMetricValues(afterMetrics, name, labelsForMetric)
+		if len(beforeValues) == 0 && len(afterValues) == 0 {
 			continue
 		}
-		found = true
+		if len(beforeValues) == 0 || len(afterValues) == 0 {
+			return 0, errors.New("metric presence changed")
+		}
 		beforeValue := SumMetric(beforeMetrics, name, labelsForMetric)
 		afterValue := SumMetric(afterMetrics, name, labelsForMetric)
-		delta := afterValue - beforeValue
-		if delta < 0 {
-			delta = afterValue
+		if afterValue < beforeValue {
+			return 0, errors.New("counter reset")
 		}
-		total += delta
+		total += afterValue - beforeValue
 	}
-	return total, found
+	return total, nil
 }
 
 func ScaleTransitionDelta(before, after ScaleMetricSnapshot, leaseNames []string) (float64, bool) {
