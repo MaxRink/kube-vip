@@ -4,18 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	log "log/slog"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
@@ -58,6 +56,10 @@ var kubeVipCmd = &cobra.Command{
 }
 
 func init() {
+	// Defaults without a corresponding flag must exist before lower-priority
+	// configuration sources are overlaid.
+	initConfig.ArpBroadcastRate = 3000
+
 	// Basic flags
 	kubeVipCmd.PersistentFlags().StringVar(&initConfig.Interface, "interface", "", "Name of the interface to bind to")
 	kubeVipCmd.PersistentFlags().StringVar(&initConfig.ServicesInterface, "serviceInterface", "", "Name of the interface to bind to (for services)")
@@ -146,7 +148,7 @@ func init() {
 	kubeVipCmd.PersistentFlags().BoolVar(&initConfig.EnableNodeLabeling, "enableNodeLabeling", false, fmt.Sprintf("Enable leader node labeling with %q, defaults to false", kubevip.HasIP))
 	kubeVipCmd.PersistentFlags().StringVar(&initConfig.ServicesLeaseName, "servicesLeaseName", "plndr-svcs-lock", "Name of the lease that is used for leader election for services (in arp mode)")
 	kubeVipCmd.PersistentFlags().StringVar(&initConfig.DNSMode, "dnsMode", "first", "Name of the mode that DNS lookup will be performed (first, ipv4, ipv6, dual)")
-	kubeVipCmd.PersistentFlags().StringVar(&initConfig.DHCPMode, "dhcpMode", "", "Mode DHCP resolving will use to obtain IP addresses (ipv4, ipv6, dual)")
+	kubeVipCmd.PersistentFlags().StringVar(&initConfig.DHCPMode, "dhcpMode", strings.ToLower(utils.IPv4Family), "Mode DHCP resolving will use to obtain IP addresses (ipv4, ipv6, dual)")
 	kubeVipCmd.PersistentFlags().UintVar(&initConfig.DHCPBackoffAttempts, "dhcpBackoffAttempts", kubevip.DefaultDHCPBackoffAttempts,
 		fmt.Sprintf("number of times DHCP client will try to obtain an IP address (defaults to: %d, 0 for unlimited retries)", kubevip.DefaultDHCPBackoffAttempts))
 	kubeVipCmd.PersistentFlags().BoolVar(&initConfig.DisableServiceUpdates, "disableServiceUpdates", false, "If true, kube-vip will process services as usual, but will not update service's Status.LoadBalancer.Ingress slice")
@@ -224,19 +226,10 @@ var kubeVipService = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error { //nolint TODO
 		cmd.SilenceUsage = true
 
-		// Load configuration from file if specified (lowest priority)
-		if initConfig.ConfigFile != "" {
-			err := kubevip.MergeConfigFromFile(&initConfig, initConfig.ConfigFile)
-			if err != nil {
-				return fmt.Errorf("loading config file: %w", err)
-			}
+		if err := loadRuntimeConfig(cmd); err != nil {
+			return err
 		}
-
-		// parse environment variables, these will overwrite anything loaded from config file
-		err := kubevip.ParseEnvironment(&initConfig)
-		if err != nil {
-			return fmt.Errorf("parsing environment: %w", err)
-		}
+		var err error
 		if err := initConfig.Validate(); err != nil {
 			return fmt.Errorf("validating configuration: %w", err)
 		}
@@ -299,19 +292,10 @@ var kubeVipManager = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error { //nolint TODO
 		cmd.SilenceUsage = true
 
-		// Load configuration from file if specified (lowest priority)
-		if initConfig.ConfigFile != "" {
-			err := kubevip.MergeConfigFromFile(&initConfig, initConfig.ConfigFile)
-			if err != nil {
-				return fmt.Errorf("loading config file: %w", err)
-			}
+		if err := loadRuntimeConfig(cmd); err != nil {
+			return err
 		}
-
-		// parse environment variables, these will overwrite anything loaded from config file
-		err := kubevip.ParseEnvironment(&initConfig)
-		if err != nil {
-			return fmt.Errorf("parsing environment: %w", err)
-		}
+		var err error
 		if err := initConfig.Validate(); err != nil {
 			return fmt.Errorf("validating configuration: %w", err)
 		}
@@ -350,12 +334,17 @@ var kubeVipManager = &cobra.Command{
 		ctx, cancel := context.WithCancel(cmd.Context())
 		defer cancel()
 
+		metrics.RegisterPrometheusMetrics()
+
 		// start prometheus server
 		if initConfig.PrometheusHTTPServer != "" {
 			wg.Go(func() {
-				servePrometheusHTTPServer(ctx, PrometheusHTTPServerConfig{
+				if err := metrics.Serve(ctx, metrics.ServerConfig{
 					Addr: initConfig.PrometheusHTTPServer,
-				})
+				}); err != nil {
+					// Continue even if metrics server fails
+					log.Error("prometheus HTTP server", "err", err)
+				}
 			})
 		}
 
@@ -473,7 +462,8 @@ var kubeVipManager = &cobra.Command{
 			return fmt.Errorf("new manager: %w", err)
 		}
 
-		metrics.RegisterPrometheusMetrics()
+		// Label metrics after the call to manager.New, as it may modify the node name
+		// if it was not set in the configuration.
 		metrics.BuildInfo.WithLabelValues(Release.Version, Release.Build, initConfig.NodeName)
 
 		// Start the service manager, this will watch the config Map and construct kube-vip services for it
@@ -485,63 +475,63 @@ var kubeVipManager = &cobra.Command{
 	},
 }
 
-// PrometheusHTTPServerConfig defines the Prometheus server configuration.
-type PrometheusHTTPServerConfig struct {
-	// Addr sets the http server address used to expose the metric endpoint
-	Addr string
-}
-
-func servePrometheusHTTPServer(ctx context.Context, config PrometheusHTTPServerConfig) {
-	var err error
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { //nolint TODO
-		_, _ = w.Write([]byte(`<html>
-			<head><title>kube-vip</title></head>
-			<body>
-			<h1>kube-vip Metrics</h1>
-			<p><a href="` + "/metrics" + `">Metrics</a></p>
-			</body>
-			</html>`))
-	})
-
-	srv := &http.Server{
-		Addr:              config.Addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 2 * time.Second,
-	}
-
-	wg := sync.WaitGroup{}
-
-	wg.Go(func() {
-		if err = srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Error("prometheus HTTP server", "err", err)
+// loadRuntimeConfig applies defaults < file < environment < explicitly changed
+// flags. Flag values are captured before lower-priority sources mutate their
+// bound fields and then restored through pflag's normal parsers.
+func loadRuntimeConfig(cmd *cobra.Command) error {
+	changed := map[string]string{}
+	changedSlices := map[string][]string{}
+	cmd.Flags().Visit(func(flag *pflag.Flag) {
+		if value, ok := flag.Value.(pflag.SliceValue); ok {
+			changedSlices[flag.Name] = slices.Clone(value.GetSlice())
 			return
 		}
+		changed[flag.Name] = flag.Value.String()
 	})
 
-	log.Info("prometheus HTTP server started")
-
-	<-ctx.Done()
-
-	// create prometheus shutdown context (independent of other contexts)
-	ctxShutDown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer func() {
-		cancel()
-	}()
-
-	if err = srv.Shutdown(ctxShutDown); err != nil {
-		log.Error("shutting down prometheus HTTP server", "err", err)
-		return
+	configPath := initConfig.ConfigFile
+	if value, ok := os.LookupEnv("config_file"); ok {
+		configPath = value
 	}
-
-	if err == http.ErrServerClosed {
-		err = nil
+	if value, ok := changed["config-file"]; ok {
+		configPath = value
 	}
-
-	log.Info("prometheus HTTP server stopped")
-
-	wg.Wait()
+	if configPath != "" {
+		if err := kubevip.MergeConfigFromFile(&initConfig, configPath); err != nil {
+			return fmt.Errorf("loading config file: %w", err)
+		}
+	}
+	if err := kubevip.ParseEnvironment(&initConfig); err != nil {
+		return fmt.Errorf("parsing environment: %w", err)
+	}
+	for name, value := range changed {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			return fmt.Errorf("restoring --%s: %w", name, err)
+		}
+	}
+	for name, value := range changedSlices {
+		flag := cmd.Flags().Lookup(name)
+		if err := flag.Value.(pflag.SliceValue).Replace(value); err != nil {
+			return fmt.Errorf("restoring --%s: %w", name, err)
+		}
+	}
+	changedBGPPeers, bgpPeersChanged := changedSlices["bgppeers"]
+	if bgpPeersChanged && strings.Join(changedBGPPeers, "") == "" {
+		initConfig.BGPPeers = changedBGPPeers
+		initConfig.BGPConfig.Peers = nil
+	} else if bgpPeersChanged {
+		initConfig.BGPPeers = changedBGPPeers
+		peers, err := kubevip.ParseBGPPeerConfig(strings.Join(initConfig.BGPPeers, ","))
+		if err != nil {
+			return fmt.Errorf("parsing --bgppeers: %w", err)
+		}
+		initConfig.BGPConfig.Peers = peers
+	}
+	if initConfig.BGPPeerConfig.Address != "" {
+		initConfig.BGPConfig.Peers = []kubevip.BGPPeer{initConfig.BGPPeerConfig}
+	}
+	initConfig.ConfigFile = configPath
+	return nil
 }
 
 func GenerateCidrRange(address string, dnsMode string) (string, error) {
