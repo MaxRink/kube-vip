@@ -251,21 +251,38 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 			// This service has been modified, but it was also active.
 			if svcCtx != nil {
 				log.Warn("(svcs) The load balancer has changed, cancelling original load balancer")
-				//Set it to inactive
-				svcCtx.Cancel()
+				oldCtx := svcCtx
+				oldWatchedService := oldCtx.WatchedService()
+				// Set it to inactive before draining its watcher outside the UID lock.
+				oldCtx.Cancel()
+				oldCtx.CallLeaderCancel()
 
 				if err := p.deleteService(ctx, svc.UID); err != nil {
 					metrics.ServiceReconcileErrorsTotal.WithLabelValues(svc.Namespace, svc.Name, "delete_service").Inc()
 					log.Error("(svc) unable to remove", "service", svc.UID)
 				}
-				// Retire the lease before the replacement context is built, so Add below
-				// cannot hand back an instance the pending cleanup is about to cancel.
-				// A lease shared with other services keeps their references and survives.
-				ns, name := lease.ServiceName(svc)
-				leaseID := lease.NewID(p.config.LeaderElectionType, ns, name)
-				p.leaseMgr.Delete(leaseID, lease.ServiceNamespacedName(svc), nil)
-				// Reset the the svcCtx when it was garbage collected
-				// As the next function will create a new context when nil
+				// Retire the old lease membership before the replacement is built.
+				if oldWatchedService != nil {
+					ns, name := lease.ServiceName(oldWatchedService)
+					p.leaseMgr.Delete(lease.NewID(p.config.LeaderElectionType, ns, name), lease.ServiceNamespacedName(oldWatchedService), nil)
+				}
+				p.svcMap.CompareAndDelete(svc.UID, oldCtx)
+				p.untrackServiceUID(svc.UID)
+				unlockService()
+				locked = false
+				if err := oldCtx.WaitForWatchingStopped(context.Background()); err != nil {
+					return fmt.Errorf("wait for replaced service watcher: %w", err)
+				}
+				unlockService = p.lockService(svc.UID)
+				locked = true
+				current, err := p.getServiceContext(svc.UID)
+				if err != nil {
+					return fmt.Errorf("get replacement service context: %w", err)
+				}
+				if current != nil {
+					return nil
+				}
+				// The next section creates a fresh context.
 				svcCtx = nil
 				svcInstance = nil
 			}
