@@ -8,6 +8,7 @@ import (
 )
 
 func TestMergeConfigFromFilePresence(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		ext     string
@@ -94,6 +95,7 @@ pprofHTTPServer: "127.0.0.1:6060"
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			path := filepath.Join(t.TempDir(), "config"+test.ext)
 			if err := os.WriteFile(path, []byte(test.content), 0600); err != nil {
 				t.Fatal(err)
@@ -111,6 +113,7 @@ pprofHTTPServer: "127.0.0.1:6060"
 }
 
 func TestMergeConfigFromFileRejectsUnknownAndExcludedFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		key  string
@@ -122,6 +125,7 @@ func TestMergeConfigFromFileRejectsUnknownAndExcludedFields(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			path := filepath.Join(t.TempDir(), "config.yaml")
 			if err := os.WriteFile(path, []byte(test.key+": true\n"), 0600); err != nil {
 				t.Fatal(err)
@@ -135,6 +139,7 @@ func TestMergeConfigFromFileRejectsUnknownAndExcludedFields(t *testing.T) {
 }
 
 func TestLoadConfigFromFileErrors(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		path string
@@ -149,6 +154,7 @@ func TestLoadConfigFromFileErrors(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := LoadConfigFromFile(test.path)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want %q", err, test.want)

@@ -8,6 +8,8 @@ import (
 )
 
 func TestEgressTableName(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		baseName string
@@ -22,6 +24,8 @@ func TestEgressTableName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if got := egressTableName(tt.baseName, tt.ipv6); got != tt.want {
 				t.Fatalf("egressTableName(%q, %t) = %q, want %q", tt.baseName, tt.ipv6, got, tt.want)
 			}
@@ -30,6 +34,8 @@ func TestEgressTableName(t *testing.T) {
 }
 
 func TestGetEgressTable(t *testing.T) {
+	t.Parallel()
+
 	table := GetEgressTable(false, "release_a")
 	if table.Name != "release_a_v4" {
 		t.Fatalf("table name = %q, want %q", table.Name, "release_a_v4")
@@ -37,6 +43,8 @@ func TestGetEgressTable(t *testing.T) {
 }
 
 func TestEgressTableBaseName(t *testing.T) {
+	t.Parallel()
+
 	if got := EgressTableBaseName(""); got != DefaultEgressTableName {
 		t.Fatalf("EgressTableBaseName(\"\") = %q, want %q", got, DefaultEgressTableName)
 	}
@@ -46,6 +54,8 @@ func TestEgressTableBaseName(t *testing.T) {
 }
 
 func TestEgressTableBaseNameForInstance(t *testing.T) {
+	t.Parallel()
+
 	if got := EgressTableBaseNameForInstance(""); got != DefaultEgressTableName {
 		t.Fatalf("EgressTableBaseNameForInstance(\"\") = %q, want %q", got, DefaultEgressTableName)
 	}
@@ -55,6 +65,8 @@ func TestEgressTableBaseNameForInstance(t *testing.T) {
 }
 
 func TestEgressTableNameForInstance(t *testing.T) {
+	t.Parallel()
+
 	baseName := EgressTableBaseNameForInstance("release_a")
 	if got := egressTableName(baseName, false); got != "kube_vip_release_a_v4" {
 		t.Fatalf("IPv4 table name = %q, want %q", got, "kube_vip_release_a_v4")
@@ -65,6 +77,8 @@ func TestEgressTableNameForInstance(t *testing.T) {
 }
 
 func TestShouldDeleteSNATChain(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		chain     *googlenftables.Chain
@@ -102,6 +116,8 @@ func TestShouldDeleteSNATChain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if got := shouldDeleteSNATChain(tt.chain, "kube_vip_snat_service-a", tt.keepTable); got != tt.want {
 				t.Fatalf("shouldDeleteSNATChain() = %t, want %t", got, tt.want)
 			}

@@ -766,6 +766,7 @@ func TestManagerClaimRegistersConcurrentMemberOnce(t *testing.T) {
 
 // TestManager_Acquire_NewLease tests acquiring a new Lease for a new Service.
 func TestManager_Acquire_NewLease(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("test-svc", "default", nil)
 
@@ -788,6 +789,7 @@ func TestManager_Acquire_NewLease(t *testing.T) {
 
 // TestManager_Acquire_ExistingRegistration tests acquiring an already registered Service.
 func TestManager_Acquire_ExistingRegistration(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("test-svc", "default", nil)
 	ctx, id := getSvcData(svc)
@@ -835,6 +837,7 @@ func TestManager_DuplicateAcquireDoesNotAddRegistration(t *testing.T) {
 
 // TestManager_Delete_CancelsContext tests the context cancellation on delete
 func TestManager_Delete_CancelsContext(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("test-svc", "default", nil)
 
@@ -865,6 +868,7 @@ func TestManager_Delete_CancelsContext(t *testing.T) {
 
 // TestManager_Acquire_AfterDelete_CreatesNewLease tests acquiring a Service after deleting it.
 func TestManager_Acquire_AfterDelete_CreatesNewLease(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("test-svc", "default", nil)
 
@@ -888,6 +892,7 @@ func TestManager_Acquire_AfterDelete_CreatesNewLease(t *testing.T) {
 
 // TestManager_Acquire_DifferentServices tests acquiring Services with different names.
 func TestManager_Acquire_DifferentServices(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc1 := createTestService("svc1", "default", nil)
 	svc2 := createTestService("svc2", "default", nil)
@@ -912,6 +917,7 @@ func TestManager_Acquire_DifferentServices(t *testing.T) {
 
 // TestManager_Acquire_SameNameDifferentNamespace tests acquiring Services with the same name in different namespaces.
 func TestManager_Acquire_SameNameDifferentNamespace(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc1 := createTestService("test-svc", "namespace1", nil)
 	svc2 := createTestService("test-svc", "namespace2", nil)
@@ -936,6 +942,7 @@ func TestManager_Acquire_SameNameDifferentNamespace(t *testing.T) {
 
 // TestManager_ConcurrentAcquire tests concurrent acquisition of one registration.
 func TestManager_ConcurrentAcquire(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("test-svc", "default", nil)
 
@@ -975,6 +982,7 @@ func TestManager_ConcurrentAcquire(t *testing.T) {
 
 // TestGetName_WithoutAnnotation tests with no annotation
 func TestGetName_WithoutAnnotation(t *testing.T) {
+	t.Parallel()
 	svc := createTestService("my-service", "my-namespace", nil)
 
 	namespace, name := ServiceName(svc)
@@ -993,6 +1001,7 @@ func TestGetName_WithoutAnnotation(t *testing.T) {
 
 // TestGetName_WithAnnotation tests with a shared lease annotation
 func TestGetName_WithAnnotation(t *testing.T) {
+	t.Parallel()
 	svc := createTestService("my-service", "my-namespace", map[string]string{
 		serviceLeaseAnnotation: "shared-lease",
 	})
@@ -1013,6 +1022,7 @@ func TestGetName_WithAnnotation(t *testing.T) {
 
 // TestGetName_WithAnnotation tests with a shared lease annotation
 func TestGetName_WithAnnotationAndOverriddenNamespace(t *testing.T) {
+	t.Parallel()
 	svc := createTestService("my-service", "my-namespace", map[string]string{
 		serviceLeaseAnnotation: "other-namespace/shared-lease",
 	})
@@ -1037,6 +1047,7 @@ func TestGetName_WithAnnotationAndOverriddenNamespace(t *testing.T) {
 
 // TestGetName_WithoutAnnotation_Etcd tests with no annotation
 func TestGetName_WithoutAnnotation_Etcd(t *testing.T) {
+	t.Parallel()
 	svc := createTestService("my-service", "my-namespace", nil)
 
 	namespace, name := ServiceName(svc)
@@ -1055,6 +1066,7 @@ func TestGetName_WithoutAnnotation_Etcd(t *testing.T) {
 
 // TestGetName_WithAnnotation_Etcd tests with a shared lease annotation
 func TestGetName_WithAnnotation_Etcd(t *testing.T) {
+	t.Parallel()
 	svc := createTestService("my-service", "my-namespace", map[string]string{
 		serviceLeaseAnnotation: "shared-lease",
 	})
@@ -1075,6 +1087,7 @@ func TestGetName_WithAnnotation_Etcd(t *testing.T) {
 
 // TestGetName_WithAnnotation_Etcd tests with a shared lease annotation
 func TestGetName_WithAnnotationAndOverriddenNamespace_Etcd(t *testing.T) {
+	t.Parallel()
 	svc := createTestService("my-service", "my-namespace", map[string]string{
 		serviceLeaseAnnotation: "other-namespace/shared-lease",
 	})
@@ -1102,6 +1115,7 @@ func TestGetName_WithAnnotationAndOverriddenNamespace_Etcd(t *testing.T) {
 // the leader election. This test verifies that after deleting the lease,
 // a new lease can be created.
 func TestManager_LeaderElectionRestartScenario_etcd(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("traefik", "traefik", nil)
 
@@ -1147,6 +1161,7 @@ func TestManager_LeaderElectionRestartScenario_etcd(t *testing.T) {
 // TestManager_CommonLeaseScenario tests the common lease feature where
 // multiple services share the same lease.
 func TestManager_CommonLeaseScenario(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 
 	// Two services sharing the same lease via annotation
@@ -1210,6 +1225,7 @@ func TestManager_CommonLeaseScenario(t *testing.T) {
 // a second goroutine calls Acquire before the first goroutine's defer deletes the lease.
 // This simulates the race condition that could cause the gaps in the logs where there is no leader.
 func TestManager_RaceCondition_LeaseExistsBeforeDelete(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("traefik", "traefik", nil)
 
@@ -1258,6 +1274,7 @@ func TestManager_RaceCondition_LeaseExistsBeforeDelete(t *testing.T) {
 
 // TestManager_NonCommonLease_MultipleAcquires tests repeated acquisition of one participant.
 func TestManager_NonCommonLease_MultipleAcquires(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("traefik", "traefik", nil) // No common lease annotation
 
@@ -1363,6 +1380,7 @@ func TestManager_LeaseContextCancelledBeforeStarted(t *testing.T) {
 // TestManager_RestartAfterLeaseContextCancelled tests that after the lease
 // context is cancelled and the lease is deleted, a new lease can be created.
 func TestManager_RestartAfterLeaseContextCancelled(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("traefik", "traefik", nil)
 
@@ -1616,6 +1634,7 @@ func TestManager_NonCommonLease_ServiceContextCancellation(t *testing.T) {
 // Deleting by name alone then cancels the live replacement, and the service is
 // never handled again.
 func TestManager_Delete_DoesNotCancelRecreatedLease(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("test-svc", "default", nil)
 	ctx, id := getSvcData(svc)
@@ -1681,6 +1700,7 @@ func TestManagerDeleteDoesNotCancelReplacementAfterDirectLeaseCancellation(t *te
 // Retiring the Lease synchronously during teardown ensures that a subsequent
 // Acquire returns a genuinely fresh instance before deferred cleanup runs.
 func TestManager_Acquire_AfterRetirementReturnsFreshLease(t *testing.T) {
+	t.Parallel()
 	mgr := NewManager()
 	svc := createTestService("test-svc", "default", nil)
 	ctx, id := getSvcData(svc)
@@ -1714,6 +1734,7 @@ func TestManager_Acquire_AfterRetirementReturnsFreshLease(t *testing.T) {
 // teardown breaks: dropping one service must not cancel a lease its siblings are
 // still using. Raised by Patryk in review of #1669.
 func TestManager_LeaseLifetimeInvariant(t *testing.T) {
+	t.Parallel()
 	shared := map[string]string{serviceLeaseAnnotation: "shared-lease"}
 
 	for _, tc := range []struct {
