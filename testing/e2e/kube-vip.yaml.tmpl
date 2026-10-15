@@ -26,10 +26,10 @@ spec:
       value: "false"
     - name: port
       value: "6443"
-    - name: vip_cidr
-      value: "32"
+    - name: vip_subnet
+      value: "32,128"
     - name: vip_leaderelection
-      value: "false"
+      value: "{{ if .VipElectionEnable }}{{ .VipElectionEnable }}{{ else }}false{{ end }}"
     - name: vip_interface
       value: lo
     - name: bgp_enable
@@ -57,10 +57,12 @@ spec:
 {{- else }}
     - name: vip_arp
       value: "true"
+    - name: vip_subnet
+      value: "32,128"
     - name: vip_interface
       value: eth0
     - name: vip_leaderelection
-      value: "true"
+      value: "{{ if .VipElectionEnable }}{{ .VipElectionEnable }}{{ else }}true{{ end }}"
     - name: vip_leaseduration
       value: "5"
     - name: vip_renewdeadline
