@@ -115,8 +115,12 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 	timer := prometheus.NewTimer(metrics.ServiceReconcileDuration.WithLabelValues(svc.Namespace))
 	defer timer.ObserveDuration()
 
-	if forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] != "true" ||
-		!forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] == "true" {
+	if forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] != "true" {
+		// A forced watcher may own a Service whose annotation was removed. Retire
+		// that old per-Service context before ignoring the now-global Service.
+		return p.deleteTrackedService(svc)
+	}
+	if !forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] == "true" {
 		return nil
 	}
 
