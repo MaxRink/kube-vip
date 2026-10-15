@@ -189,6 +189,34 @@ func TestAddOrModifyStopsTrackedServiceWhenTypeChanges(t *testing.T) {
 	}
 }
 
+func TestForcedWatcherRetiresServiceWhenElectionAnnotationIsRemoved(t *testing.T) {
+	uid := types.UID("forced-service-uid")
+	previous := &v1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "example", Namespace: "default", UID: uid,
+		Annotations: map[string]string{kubevip.ForcePerServiceElection: "true"},
+	}, Spec: v1.ServiceSpec{Type: v1.ServiceTypeLoadBalancer, LoadBalancerIP: "192.0.2.10"}}
+	modified := previous.DeepCopy()
+	modified.Annotations = nil
+
+	p := &Processor{
+		config:           &kubevip.Config{PerServiceElectionOnDemand: true},
+		leaseMgr:         lease.NewManager(),
+		ServiceInstances: []*instance.Instance{{ServiceUID: uid, ServiceSnapshot: previous}},
+	}
+	svcCtx := servicecontext.New(context.Background())
+	p.svcMap.Store(uid, svcCtx)
+
+	if err := p.AddOrModify(context.Background(), watch.Event{Type: watch.Modified, Object: modified}, nil, true, nil, nil); err != nil {
+		t.Fatalf("AddOrModify returned error: %v", err)
+	}
+	if svcCtx.Ctx.Err() == nil {
+		t.Fatal("forced watcher left the old per-Service context active")
+	}
+	if _, ok := p.svcMap.Load(uid); ok {
+		t.Fatal("forced watcher left the old per-Service context tracked")
+	}
+}
+
 // TestDropCancelledServiceContext is a regression test for the lease/svcMap desync that
 // permanently stops a LoadBalancer VIP from being advertised.
 //
