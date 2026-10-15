@@ -232,7 +232,8 @@ func (c *Common) runGlobalElection(ctx context.Context, a election.Actions, leas
 	wg := sync.WaitGroup{}
 	defer wg.Wait()
 	var electionVIPs []string
-	if config.EnableServices && leaseName == config.ServicesLeaseName {
+	servicesNamespace, servicesLeaseName := lease.NamespaceName(config.ServicesLeaseName, config)
+	if config.EnableServices && ns == servicesNamespace && leaseName == servicesLeaseName {
 		var err error
 		electionVIPs, err = c.svcProcessor.ElectionVIPs(ctx)
 		if err != nil {
