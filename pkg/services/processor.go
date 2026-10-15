@@ -7,6 +7,7 @@ import (
 	"net"
 	"reflect"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -174,6 +175,7 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 			unlockService()
 		}
 	}()
+	waitedForDrain := false
 	for {
 		value, ok := p.draining.Load(svc.UID)
 		if !ok {
@@ -183,8 +185,32 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 		unlockService()
 		locked = false
 		<-drain.done
+		waitedForDrain = true
 		unlockService = p.lockService(svc.UID)
 		locked = true
+	}
+	if waitedForDrain {
+		current, err := p.getServiceContext(svc.UID)
+		if err != nil {
+			unlockService()
+			locked = false
+			return fmt.Errorf("get current service context after drain: %w", err)
+		}
+		if current != nil {
+			if watched := current.WatchedService(); serviceSnapshotNewer(watched, svc) {
+				svc = watched
+				if forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] != "true" {
+					unlockService()
+					locked = false
+					return p.retireForcedService(svc)
+				}
+				if !forcedOnly && svc.Annotations[kubevip.ForcePerServiceElection] == "true" {
+					unlockService()
+					locked = false
+					return nil
+				}
+			}
+		}
 	}
 	svcInstance := instance.FindServiceInstance(svc, p.ServiceInstances)
 
@@ -877,6 +903,24 @@ func changedSinceWatched(i *instance.Instance, svcCtx *servicecontext.Context, s
 		}
 	}
 	return false
+}
+
+func serviceSnapshotNewer(candidate, current *v1.Service) bool {
+	if candidate == nil || current == nil || candidate == current {
+		return false
+	}
+	if candidate.ResourceVersion == "" || current.ResourceVersion == "" {
+		return true
+	}
+	if candidate.ResourceVersion == current.ResourceVersion {
+		return false
+	}
+	candidateVersion, candidateErr := strconv.ParseUint(candidate.ResourceVersion, 10, 64)
+	currentVersion, currentErr := strconv.ParseUint(current.ResourceVersion, 10, 64)
+	if candidateErr == nil && currentErr == nil {
+		return candidateVersion > currentVersion
+	}
+	return candidate.ResourceVersion != current.ResourceVersion
 }
 
 func serviceChanged(original, svc *v1.Service) bool {
