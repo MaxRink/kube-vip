@@ -183,6 +183,11 @@ func (p *Processor) AddOrModify(ctx context.Context, event watch.Event, serviceF
 	if svcCtx == nil {
 		// A cancelled watcher cannot be paired with its old instance after a
 		// leadership handoff; force construction of a fresh instance below.
+		if svcInstance != nil {
+			if err := p.deleteService(context.Background(), svc.UID); err != nil {
+				return fmt.Errorf("failed to retire cancelled service instance: %w", err)
+			}
+		}
 		svcInstance = nil
 	}
 
@@ -783,7 +788,7 @@ func serviceChanged(original, svc *v1.Service) bool {
 		// ExternalTrafficPolicy changed
 		svc.Spec.ExternalTrafficPolicy != original.Spec.ExternalTrafficPolicy ||
 		// IP stack configuration changed
-		!reflect.DeepEqual(svc.Spec.IPFamilies, i.ServiceSnapshot.Spec.IPFamilies) ||
+		!reflect.DeepEqual(svc.Spec.IPFamilies, original.Spec.IPFamilies) ||
 		(svc.Spec.IPFamilyPolicy == nil) != (original.Spec.IPFamilyPolicy == nil) ||
 		(svc.Spec.IPFamilyPolicy != nil && original.Spec.IPFamilyPolicy != nil && *svc.Spec.IPFamilyPolicy != *original.Spec.IPFamilyPolicy) ||
 		// DDNS was disabled/enabled
