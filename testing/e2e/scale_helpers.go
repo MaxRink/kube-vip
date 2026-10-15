@@ -5,7 +5,6 @@ package e2e
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"

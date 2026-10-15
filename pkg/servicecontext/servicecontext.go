@@ -165,25 +165,3 @@ func (ctx *Context) WaitForWatchingStopped(waitCtx context.Context) error {
 		return nil
 	}
 }
-
-func (ctx *Context) StartWatching() bool {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	if ctx.IsWatched {
-		return false
-	}
-	ctx.IsWatched = true
-	return true
-}
-
-func (ctx *Context) StopWatching() {
-	ctx.mu.Lock()
-	if !ctx.IsWatched {
-		ctx.mu.Unlock()
-		return
-	}
-	ctx.IsWatched = false
-	stopped := ctx.watchingStopped
-	ctx.mu.Unlock()
-	ctx.watchingStopOnce.Do(func() { close(stopped) })
-}
