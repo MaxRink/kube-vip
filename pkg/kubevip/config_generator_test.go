@@ -12,6 +12,8 @@ import (
 )
 
 func TestGenerateRoleServiceCIDRAccess(t *testing.T) {
+	t.Parallel()
+
 	clusterRole := GenerateRole(&Config{}, false)
 	if !hasServiceCIDRRule(clusterRole) {
 		t.Fatal("generated ClusterRole is missing ServiceCIDR access")
@@ -97,6 +99,8 @@ func TestParseEnvironmentBGPAttachIPToInterface(t *testing.T) {
 }
 
 func TestGeneratePodSpecBGPAttachIPToInterface(t *testing.T) {
+	t.Parallel()
+
 	pod, err := generatePodSpec(&Config{
 		EnableBGP:              true,
 		BGPAttachIPToInterface: true,
@@ -114,6 +118,8 @@ func TestGeneratePodSpecBGPAttachIPToInterface(t *testing.T) {
 }
 
 func TestGeneratePodSpecInstanceName(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		instanceName string
@@ -125,6 +131,8 @@ func TestGeneratePodSpecInstanceName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			pod, err := generatePodSpec(&Config{InstanceName: tt.instanceName}, "ghcr.io/kube-vip/kube-vip", "v0.0.0", true)
 			if err != nil {
 				t.Fatalf("generatePodSpec() error = %v", err)
