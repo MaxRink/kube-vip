@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Clear the active egress endpoint during a zero-endpoint transition so restoring the same endpoint triggers egress reconciliation. Fixes #1830.
 - Create distinct anonymous nftables destination-port sets for each egress allowed-network rule, preventing `EBUSY` when multiple allowed networks and destination ports are combined. Fixes #1804.
 - Use host scope for local routing-table routes so Linux accepts IPv4 `RTN_LOCAL` routes without assigning the VIP to an interface.
 - Make `manager` and `service` runtime configuration presence-aware, with explicit CLI flags taking precedence over environment variables, configuration files, and defaults. Strict YAML/JSON loading now preserves explicit false, zero, and empty values and normalizes standalone BGP peer configuration for runtime use.
@@ -21,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Added
+- Prometheus metrics for build information, service activity, reconciliation,
+  leader election, and watcher-loop liveness, with a metrics reference guide.
 - Configurable control-plane health check for BGP mode without leader election
   - Polls a configurable HTTP(S) endpoint (e.g. `https://localhost:6443/livez`) to verify the exposed service is healthy (usually the local kube-apiserver)
   - Withdraws the BGP route after a configurable number of consecutive failures, removing the unhealthy node from the ECMP set
