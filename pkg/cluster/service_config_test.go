@@ -7,6 +7,8 @@ import (
 )
 
 func TestShouldAddServiceIP(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		config *kubevip.Config
@@ -47,6 +49,8 @@ func TestShouldAddServiceIP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if got := shouldAddServiceIP(tt.config); got != tt.want {
 				t.Fatalf("shouldAddServiceIP() = %t, want %t", got, tt.want)
 			}
